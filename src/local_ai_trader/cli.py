@@ -2,7 +2,7 @@
 
 import argparse
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import logging
 from pathlib import Path
 
@@ -10,6 +10,7 @@ import duckdb
 
 from local_ai_trader.data.clean import clean_candles
 from local_ai_trader.data.download import download_candles
+from local_ai_trader.data.dataset import create_target_dataset
 from local_ai_trader.data.storage import write_json, write_parquet
 from local_ai_trader.settings import load_settings, validate_symbol
 
@@ -85,11 +86,16 @@ def main(argv: list[str] | None = None) -> int:
     download.add_argument("--symbols", nargs="+", help="Override configured Coinbase products")
     inspect = commands.add_parser("inspect", help="Query a Parquet dataset using DuckDB")
     inspect.add_argument("path", type=Path)
+    targets = commands.add_parser("targets", help="Build causal-time-labelled forward-return targets")
+    targets.add_argument("path", type=Path, help="Original candle Parquet file")
+    targets.add_argument("--config", type=Path, default=Path("config/settings.toml"))
     arguments = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
         if arguments.command == "download":
             collect(arguments.config, arguments.start, arguments.end, arguments.symbols)
+        elif arguments.command == "targets":
+            create_target_dataset(arguments.path, load_settings(arguments.config))
         else:
             if not arguments.path.is_file():
                 raise ValueError(f"Parquet file not found: {arguments.path}")

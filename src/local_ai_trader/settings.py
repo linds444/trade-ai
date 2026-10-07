@@ -12,6 +12,7 @@ class Settings:
     symbols: tuple[str, ...]
     candle_seconds: int
     horizon_steps: int
+    flat_return_threshold: float
     lookback_days: int
     timeout_seconds: int
     max_attempts: int
@@ -45,6 +46,11 @@ def load_settings(path: Path) -> Settings:
     horizon = positive_integer(market["prediction_horizon_minutes"], "horizon") * 60
     if horizon % seconds:
         raise ValueError("Prediction horizon must be a whole number of candle intervals")
+    threshold = config["targets"]["flat_return_threshold"]
+    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+        raise ValueError("flat_return_threshold must be a numeric fraction")
+    if not math.isfinite(threshold) or not 0 <= threshold < 1:
+        raise ValueError("flat_return_threshold must be finite and between 0 (inclusive) and 1 (exclusive)")
     symbols = market["symbols"]
     if not isinstance(symbols, list) or not symbols or not all(isinstance(s, str) for s in symbols):
         raise ValueError("symbols must be a nonempty list of product identifiers")
@@ -58,6 +64,7 @@ def load_settings(path: Path) -> Settings:
         symbols=tuple(validate_symbol(s) for s in symbols),
         candle_seconds=seconds,
         horizon_steps=horizon // seconds,
+        flat_return_threshold=float(threshold),
         lookback_days=positive_integer(download["lookback_days"], "lookback_days"),
         timeout_seconds=positive_integer(download["timeout_seconds"], "timeout_seconds"),
         max_attempts=positive_integer(download["max_attempts"], "max_attempts"),

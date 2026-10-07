@@ -4,6 +4,10 @@ symbols = ["BTC-USD", "ETH-USD"]
 candle_minutes = 5
 prediction_horizon_minutes = 30
 
+[targets]
+# Provisional label boundary: +/-0.1% is flat. This is not a trading threshold.
+flat_return_threshold = 0.001
+
 [download]
 lookback_days = 7
 timeout_seconds = 30

@@ -1,8 +1,9 @@
 # Trade AI
 
 A local, Windows-first market research project for an NVIDIA RTX 3060 (12 GB).
-The first milestone collects and validates historical data. It does not yet
-train a model, make trading recommendations, or execute orders.
+The current milestone collects and validates historical data and builds
+forward-return targets. It does not yet train a model, make trading
+recommendations, or execute orders.
 
 ## Verified starting environment
 
@@ -57,8 +58,8 @@ below. No activation or execution-policy changes are necessary.
 `config/settings.toml` defaults to Coinbase **BTC-USD and ETH-USD**, five-minute
 candles, a planned 30-minute prediction horizon (six candles), and seven days of
 history. TOML uses Python's standard library and avoids a YAML dependency.
-The prediction horizon is metadata for the next milestone; targets are not
-generated yet. USD spot candles are not interchangeable with USDT markets.
+The prediction horizon also controls the separate target-generation command.
+USD spot candles are not interchangeable with USDT markets.
 
 Start with a fixed one-hour smoke test, not a training dataset:
 
@@ -123,6 +124,9 @@ Tests cover pagination boundaries, timestamp availability, duplicate conflicts,
 invalid prices, missing intervals, retry behavior, output preservation, timezone
 conversion, Parquet round trips and DuckDB queries. Tests use synthetic candles
 and need neither network access nor a GPU.
+Target tests additionally cover six-step indexing, label availability, inclusive
+flat boundaries, insufficient future data, nonfinite returns and rejection of
+gaps, duplicates, multiple assets, unfinished candles and malformed prices.
 
 Core dependencies have compatibility ranges. After a verified installation,
 record its exact resolved versions for local reproducibility:
@@ -134,14 +138,58 @@ record its exact resolved versions for local reproducibility:
 That local snapshot can include an absolute editable-install path; keep it as an
 environment record rather than assuming it is portable to another computer.
 
+## Forward-return targets
+
+From a validated candle file, generate labels in a separate Parquet snapshot:
+
+```powershell
+.\.venv\Scripts\python.exe -m local_ai_trader targets data/processed/coinbase_BTC-USD_300s_1790804400_1791409200.parquet
+```
+
+This filename matches the user's verified seven-day BTC download. Replace it
+with another original candle file when needed. Outputs appear in
+`data/processed/targets/`, with a `_h6.parquet` suffix and a `.targets.json`
+metadata file. A 2,016-candle dataset yields **2,010 labelled rows** because the
+last six future outcomes are unknown within that snapshot. Original candle
+datasets are preserved, and target snapshots cannot be overwritten.
+
+For a prediction made at candle close time `available_at[t]`, the target is:
+
+```text
+target_return[t] = close[t + 6] / close[t] - 1
+target_available_at[t] = available_at[t + 6]
+```
+
+For example, the 10:00 candle is fully known at 10:05. Its six-step outcome uses
+the 10:30 candle's close, known at 10:35: exactly 30 minutes after prediction
+time. This target is a close-to-close price outcome, not an assumed executable
+trade return.
+
+The provisional `targets.flat_return_threshold = 0.001` is a fractional return:
+
+- `up`: return above +0.1%.
+- `down`: return below -0.1%.
+- `flat`: return between those boundaries, inclusive.
+
+A machine-precision tolerance (eight float64 epsilons) absorbs numerical
+roundoff at the two boundaries; it is recorded in the metadata. The threshold
+is a research choice, not a policy threshold, fee allowance, calibrated
+probability or prediction. Later changes must be evaluated using training and
+validation data without tuning on the held-out test set.
+
+The metadata records the source SHA-256, horizon, threshold, class counts and
+label availability. **All `target_*` columns contain future-only information**
+and must be excluded from model inputs. Chronological splitting is not yet
+implemented: the next milestone must purge overlapping labels using
+`target_available_at`, not simply slice consecutive rows or split randomly.
+
 ## Next milestones
 
-1. Define forward-return and up/down/flat targets with precise availability times.
-2. Build causal features and chronological splits, purging overlapping forward
+1. Build causal features and chronological splits, purging overlapping forward
    labels at split boundaries before comparing a naive baseline and logistic regression.
-3. Compare gradient boosting and a small GPU MLP; measure calibration separately.
-4. Add cost-aware backtesting, walk-forward evaluation and local experiment logs.
-5. Add a Transformer only when evidence warrants it, then uncertainty, configurable
+2. Compare gradient boosting and a small GPU MLP; measure calibration separately.
+3. Add cost-aware backtesting, walk-forward evaluation and local experiment logs.
+4. Add a Transformer only when evidence warrants it, then uncertainty, configurable
    policy, a separate risk gate, paper trading, API and dashboard.
 
 Every change must demonstrate improvement against the previous model on suitable
