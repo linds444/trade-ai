@@ -11,6 +11,7 @@ import duckdb
 from local_ai_trader.data.clean import clean_candles
 from local_ai_trader.data.download import download_candles
 from local_ai_trader.data.dataset import create_target_dataset
+from local_ai_trader.data.split import create_split_dataset
 from local_ai_trader.features.build_features import create_feature_dataset
 from local_ai_trader.data.storage import write_json, write_parquet
 from local_ai_trader.settings import load_settings, validate_symbol
@@ -93,6 +94,9 @@ def main(argv: list[str] | None = None) -> int:
     features = commands.add_parser("features", help="Build trailing features from a labelled dataset")
     features.add_argument("path", type=Path, help="Labelled target Parquet file")
     features.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    split = commands.add_parser("split", help="Create chronological partitions with overlapping labels purged")
+    split.add_argument("path", type=Path, help="Feature Parquet file")
+    split.add_argument("--config", type=Path, default=Path("config/settings.toml"))
     arguments = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
@@ -102,6 +106,8 @@ def main(argv: list[str] | None = None) -> int:
             create_target_dataset(arguments.path, load_settings(arguments.config))
         elif arguments.command == "features":
             create_feature_dataset(arguments.path, load_settings(arguments.config))
+        elif arguments.command == "split":
+            create_split_dataset(arguments.path, load_settings(arguments.config))
         else:
             if not arguments.path.is_file():
                 raise ValueError(f"Parquet file not found: {arguments.path}")

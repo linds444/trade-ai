@@ -2,7 +2,8 @@
 
 A local, Windows-first market research project for an NVIDIA RTX 3060 (12 GB).
 The current milestone collects and validates historical data, builds
-forward-return targets, and computes causal features. It does not yet train a model, make trading
+forward-return targets, computes causal features, and creates purged chronological
+splits. It does not yet train a model, make trading
 recommendations, or execute orders.
 
 ## Verified starting environment
@@ -130,6 +131,8 @@ gaps, duplicates, multiple assets, unfinished candles and malformed prices.
 Feature tests compare calculations to independent scalar formulas, alter future
 candles, truncate future history, change target values, check zero-volume and
 flat candles, and validate dataset provenance and immutable storage.
+Split tests check strict label boundaries, chronological ordering, row accounting,
+settings compatibility and cleanup after a failed bundle write.
 
 Core dependencies have compatibility ranges. After a verified installation,
 record its exact resolved versions for local reproducibility:
@@ -182,9 +185,9 @@ validation data without tuning on the held-out test set.
 
 The metadata records the source SHA-256, horizon, threshold, class counts and
 label availability. **All `target_*` columns contain future-only information**
-and must be excluded from model inputs. Chronological splitting is not yet
-implemented: the next milestone must purge overlapping labels using
-`target_available_at`, not simply slice consecutive rows or split randomly.
+and must be excluded from model inputs. Chronological splitting is
+performed by the separate split command using `target_available_at`; it never
+shuffles rows or randomly divides time-series data.
 
 ## Causal features
 
@@ -228,10 +231,56 @@ Future models must select only the eight `feature_names` in the metadata.
 Targets and timestamps stay in the dataset for supervision and chronological
 evaluation; they are not model inputs.
 
+## Chronological splits
+
+Create separate train, validation and held-out test files:
+
+```powershell
+.\.venv\Scripts\python.exe -m local_ai_trader split data/processed/features/coinbase_BTC-USD_300s_1790804400_1791409200_h6_features.parquet
+```
+
+The fractions are configured under `[split]` in `config/settings.toml`:
+60% training, 20% validation, with the remainder reserved for testing. The cut
+positions are `floor(N * train_fraction)` and
+`floor(N * (train_fraction + validation_fraction))`.
+
+After assigning the chronological periods, the code removes any training row
+whose `target_available_at` is **at or after the first validation prediction
+time**. It applies the same rule to validation against the first test prediction
+time. This is stricter than just sorting and slicing: overlapping future labels
+must not cross those boundaries. A label known exactly at the next period's
+start is purged conservatively. The test rows already have known outcomes, so
+no further end purging is necessary.
+
+For the user's verified 1,998-row files:
+
+| Partition | Before purging | Purged labels | Retained rows |
+| --- | ---: | ---: | ---: |
+| Train | 1,198 | 6 | 1,192 |
+| Validation | 400 | 6 | 394 |
+| Test | 400 | 0 | 400 |
+
+Validation and test features may legitimately use older candle history. The
+restriction applies to future labels entering earlier training/model-selection
+periods; past prices do not become unavailable at an arbitrary split boundary.
+
+Outputs are stored under `data/processed/splits/<feature-file-stem>/`:
+`train.parquet`, `validation.parquet`, `test.parquet` and `split.json`.
+The report records the source hash, feature allowlist and provenance, cut
+positions, purged prediction times, class counts and availability bounds.
+All files are staged and then published as one directory; failed writes do not
+leave a partially published split bundle. Existing bundles cannot be overwritten.
+
+No scalers or models are fitted. The upcoming baseline must fit preprocessing
+and model parameters only on the training file, use validation for model
+selection, and reserve the test file for evaluation of frozen choices. Seven
+days is an engineering sample, not sufficient evidence of predictive stability
+or trading profitability. Longer history and walk-forward evaluation follow.
+
 ## Next milestones
 
-1. Build chronological splits, purging overlapping forward labels at split
-   boundaries before comparing a naive baseline and logistic regression.
+1. Compare a naive baseline and logistic regression with train-only preprocessing
+   and separate validation/test metrics.
 2. Compare gradient boosting and a small GPU MLP; measure calibration separately.
 3. Add cost-aware backtesting, walk-forward evaluation and local experiment logs.
 4. Add a Transformer only when evidence warrants it, then uncertainty, configurable

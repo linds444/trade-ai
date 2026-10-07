@@ -12,6 +12,11 @@ flat_return_threshold = 0.001
 momentum_steps = 6
 rolling_window = 12
 
+[split]
+train_fraction = 0.6
+validation_fraction = 0.2
+# Remaining 0.2 is held out for testing; overlapping labels are purged.
+
 [download]
 lookback_days = 7
 timeout_seconds = 30

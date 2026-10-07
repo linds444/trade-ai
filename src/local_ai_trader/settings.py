@@ -15,6 +15,8 @@ class Settings:
     flat_return_threshold: float
     momentum_steps: int
     rolling_window: int
+    train_fraction: float
+    validation_fraction: float
     lookback_days: int
     timeout_seconds: int
     max_attempts: int
@@ -33,6 +35,15 @@ def positive_integer(value: object, name: str) -> int:
     if type(value) is not int or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
     return value
+
+
+def validate_split_fractions(train: object, validation: object) -> tuple[float, float]:
+    for name, value in (("train_fraction", train), ("validation_fraction", validation)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 < value < 1:
+            raise ValueError(f"{name} must be a finite fraction strictly between 0 and 1")
+    if train + validation >= 1:
+        raise ValueError("Train and validation fractions must sum to less than 1 to leave test data")
+    return float(train), float(validation)
 
 
 def load_settings(path: Path) -> Settings:
@@ -65,6 +76,9 @@ def load_settings(path: Path) -> Settings:
     rolling_window = positive_integer(config["features"]["rolling_window"], "rolling_window")
     if rolling_window < 2:
         raise ValueError("rolling_window must be at least 2")
+    train_fraction, validation_fraction = validate_split_fractions(
+        config["split"]["train_fraction"], config["split"]["validation_fraction"],
+    )
     return Settings(
         symbols=tuple(validate_symbol(s) for s in symbols),
         candle_seconds=seconds,
@@ -72,6 +86,8 @@ def load_settings(path: Path) -> Settings:
         flat_return_threshold=float(threshold),
         momentum_steps=positive_integer(config["features"]["momentum_steps"], "momentum_steps"),
         rolling_window=rolling_window,
+        train_fraction=train_fraction,
+        validation_fraction=validation_fraction,
         lookback_days=positive_integer(download["lookback_days"], "lookback_days"),
         timeout_seconds=positive_integer(download["timeout_seconds"], "timeout_seconds"),
         max_attempts=positive_integer(download["max_attempts"], "max_attempts"),
