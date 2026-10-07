@@ -1,8 +1,8 @@
 # Trade AI
 
 A local, Windows-first market research project for an NVIDIA RTX 3060 (12 GB).
-The current milestone collects and validates historical data and builds
-forward-return targets. It does not yet train a model, make trading
+The current milestone collects and validates historical data, builds
+forward-return targets, and computes causal features. It does not yet train a model, make trading
 recommendations, or execute orders.
 
 ## Verified starting environment
@@ -127,6 +127,9 @@ and need neither network access nor a GPU.
 Target tests additionally cover six-step indexing, label availability, inclusive
 flat boundaries, insufficient future data, nonfinite returns and rejection of
 gaps, duplicates, multiple assets, unfinished candles and malformed prices.
+Feature tests compare calculations to independent scalar formulas, alter future
+candles, truncate future history, change target values, check zero-volume and
+flat candles, and validate dataset provenance and immutable storage.
 
 Core dependencies have compatibility ranges. After a verified installation,
 record its exact resolved versions for local reproducibility:
@@ -183,10 +186,52 @@ and must be excluded from model inputs. Chronological splitting is not yet
 implemented: the next milestone must purge overlapping labels using
 `target_available_at`, not simply slice consecutive rows or split randomly.
 
+## Causal features
+
+Generate model inputs from a labelled target snapshot:
+
+```powershell
+.\.venv\Scripts\python.exe -m local_ai_trader features data/processed/targets/coinbase_BTC-USD_300s_1790804400_1791409200_h6.parquet
+```
+
+The default settings use a six-candle momentum interval and 12-candle trailing
+window, both configurable in `config/settings.toml`. The eight inputs are:
+
+| Feature | Calculation at candle t | Research purpose |
+| --- | --- | --- |
+| `feature_return_1` | `close[t] / close[t-1] - 1` | Most recent price move |
+| `feature_momentum` | `close[t] / close[t-6] - 1` | Recent 30-minute direction |
+| `feature_volatility` | Population standard deviation of the last 12 log returns | Recent variation in five-minute returns; not annualized |
+| `feature_close_vs_mean` | `close[t] / mean(close[t-11:t]) - 1` | Position relative to the recent price level |
+| `feature_volume_ratio` | `volume[t] / mean(volume[t-11:t])` | Activity relative to the recent baseline |
+| `feature_range` | `(high[t] - low[t]) / close[t]` | Current candle's price range |
+| `feature_body` | `(close[t] - open[t]) / open[t]` | Signed movement within the candle |
+| `feature_close_location` | `(close[t] - low[t]) / (high[t] - low[t])` | Where the candle finished within its range |
+
+The table's ranges include both endpoints. Rolling windows include the current
+fully closed candle and older candles. Twelve log returns require 13 closes,
+so the first 12 rows are warmup: **2,010 labelled rows become 1,998 feature rows**.
+A window containing only zero volume uses ratio 0; a zero-width candle uses
+neutral close location 0.5. Other nonfinite results fail rather than silently
+removing arbitrary internal rows.
+
+Feature Parquet snapshots and `.features.json` reports are stored under
+`data/processed/features/`. Reports include the ordered feature allowlist,
+parameters, warmup count, class counts, source hash and original target metadata.
+The target horizon, interval and flat threshold must agree with the current
+settings; a mismatch fails instead of relabelling old data. Original targets
+are preserved. Existing feature snapshots cannot be overwritten.
+
+No fitted scaling or normalization is applied yet. Each feature is a hypothesis
+to evaluate against a baseline, not an established source of predictive signal.
+Future models must select only the eight `feature_names` in the metadata.
+Targets and timestamps stay in the dataset for supervision and chronological
+evaluation; they are not model inputs.
+
 ## Next milestones
 
-1. Build causal features and chronological splits, purging overlapping forward
-   labels at split boundaries before comparing a naive baseline and logistic regression.
+1. Build chronological splits, purging overlapping forward labels at split
+   boundaries before comparing a naive baseline and logistic regression.
 2. Compare gradient boosting and a small GPU MLP; measure calibration separately.
 3. Add cost-aware backtesting, walk-forward evaluation and local experiment logs.
 4. Add a Transformer only when evidence warrants it, then uncertainty, configurable

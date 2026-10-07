@@ -8,6 +8,10 @@ prediction_horizon_minutes = 30
 # Provisional label boundary: +/-0.1% is flat. This is not a trading threshold.
 flat_return_threshold = 0.001
 
+[features]
+momentum_steps = 6
+rolling_window = 12
+
 [download]
 lookback_days = 7
 timeout_seconds = 30

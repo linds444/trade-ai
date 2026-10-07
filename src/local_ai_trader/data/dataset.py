@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from local_ai_trader.data.storage import write_json, write_parquet
+from local_ai_trader.data.validate import validate_candle_timeline
 from local_ai_trader.settings import Settings, positive_integer
 
 LOGGER = logging.getLogger(__name__)
@@ -31,35 +32,12 @@ def build_targets(
         raise ValueError("flat_return_threshold must be a numeric fraction")
     if not np.isfinite(flat_return_threshold) or not 0 <= flat_return_threshold < 1:
         raise ValueError("Invalid flat_return_threshold")
-    required = {"timestamp", "available_at", "close", "symbol", "exchange"}
-    if not required.issubset(candles.columns):
-        raise ValueError(f"Missing candle columns: {sorted(required - set(candles.columns))}")
     if any(column.startswith("target_") for column in candles.columns):
         raise ValueError("Input already contains target columns; use the original candle dataset")
     if len(candles) <= horizon_steps:
         raise ValueError("Not enough candles for the requested horizon")
-    frame = candles.copy().reset_index(drop=True)
-    for column in ("symbol", "exchange"):
-        if frame[column].isna().any() or frame[column].nunique() != 1:
-            raise ValueError("Targets require exactly one symbol and one exchange per dataset")
-    for column in ("timestamp", "available_at"):
-        if frame[column].isna().any() or getattr(frame[column].dtype, "tz", None) is None:
-            raise ValueError(f"{column} must contain timezone-aware, nonmissing datetimes")
-        frame[column] = frame[column].dt.tz_convert("UTC")
-    interval = pd.Timedelta(candle_seconds, unit="s")
-    if not frame["timestamp"].eq(frame["timestamp"].dt.floor(f"{candle_seconds}s")).all():
-        raise ValueError("Candle timestamps must be interval-aligned")
-    if not frame["timestamp"].diff().iloc[1:].eq(interval).all():
-        raise ValueError("Candles must be ordered, unique and contiguous; do not shift across gaps")
-    if not frame["available_at"].eq(frame["timestamp"] + interval).all():
-        raise ValueError("Candle availability must equal its open timestamp plus one interval")
-    if frame["available_at"].max() > pd.Timestamp.now(tz="UTC"):
-        raise ValueError("Input contains unfinished or future candles")
-    if not pd.api.types.is_numeric_dtype(frame["close"]) or pd.api.types.is_bool_dtype(frame["close"]):
-        raise ValueError("Close prices must be numeric")
+    frame = validate_candle_timeline(candles, candle_seconds)
     close = frame["close"].to_numpy(dtype=np.float64, na_value=np.nan)
-    if not np.isfinite(close).all() or not (close > 0).all():
-        raise ValueError("Close prices must be positive and finite")
     with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
         returns = close[horizon_steps:] / close[:-horizon_steps] - 1
     if not np.isfinite(returns).all():

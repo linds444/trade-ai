@@ -13,6 +13,8 @@ class Settings:
     candle_seconds: int
     horizon_steps: int
     flat_return_threshold: float
+    momentum_steps: int
+    rolling_window: int
     lookback_days: int
     timeout_seconds: int
     max_attempts: int
@@ -60,11 +62,16 @@ def load_settings(path: Path) -> Settings:
     if not math.isfinite(pause) or pause < 0:
         raise ValueError("request_pause_seconds must be finite and nonnegative")
     root = path.parent.parent
+    rolling_window = positive_integer(config["features"]["rolling_window"], "rolling_window")
+    if rolling_window < 2:
+        raise ValueError("rolling_window must be at least 2")
     return Settings(
         symbols=tuple(validate_symbol(s) for s in symbols),
         candle_seconds=seconds,
         horizon_steps=horizon // seconds,
         flat_return_threshold=float(threshold),
+        momentum_steps=positive_integer(config["features"]["momentum_steps"], "momentum_steps"),
+        rolling_window=rolling_window,
         lookback_days=positive_integer(download["lookback_days"], "lookback_days"),
         timeout_seconds=positive_integer(download["timeout_seconds"], "timeout_seconds"),
         max_attempts=positive_integer(download["max_attempts"], "max_attempts"),

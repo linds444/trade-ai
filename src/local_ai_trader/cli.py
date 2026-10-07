@@ -11,6 +11,7 @@ import duckdb
 from local_ai_trader.data.clean import clean_candles
 from local_ai_trader.data.download import download_candles
 from local_ai_trader.data.dataset import create_target_dataset
+from local_ai_trader.features.build_features import create_feature_dataset
 from local_ai_trader.data.storage import write_json, write_parquet
 from local_ai_trader.settings import load_settings, validate_symbol
 
@@ -89,6 +90,9 @@ def main(argv: list[str] | None = None) -> int:
     targets = commands.add_parser("targets", help="Build causal-time-labelled forward-return targets")
     targets.add_argument("path", type=Path, help="Original candle Parquet file")
     targets.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    features = commands.add_parser("features", help="Build trailing features from a labelled dataset")
+    features.add_argument("path", type=Path, help="Labelled target Parquet file")
+    features.add_argument("--config", type=Path, default=Path("config/settings.toml"))
     arguments = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
@@ -96,6 +100,8 @@ def main(argv: list[str] | None = None) -> int:
             collect(arguments.config, arguments.start, arguments.end, arguments.symbols)
         elif arguments.command == "targets":
             create_target_dataset(arguments.path, load_settings(arguments.config))
+        elif arguments.command == "features":
+            create_feature_dataset(arguments.path, load_settings(arguments.config))
         else:
             if not arguments.path.is_file():
                 raise ValueError(f"Parquet file not found: {arguments.path}")
