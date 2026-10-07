@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-ai-trader"
+version = "0.1.0"
+description = "Local market-data research and paper-trading foundations"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0,<3",
+    "pandas>=2.2,<3",
+    "pyarrow>=19,<24",
+    "duckdb>=1.2,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+
+[project.scripts]
+trade-ai = "local_ai_trader.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

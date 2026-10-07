@@ -1,0 +1,15 @@
+[market]
+exchange = "coinbase"
+symbols = ["BTC-USD", "ETH-USD"]
+candle_minutes = 5
+prediction_horizon_minutes = 30
+
+[download]
+lookback_days = 7
+timeout_seconds = 30
+max_attempts = 3
+request_pause_seconds = 0.35
+
+[paths]
+raw = "data/raw"
+processed = "data/processed"
