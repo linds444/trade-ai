@@ -70,6 +70,8 @@ Expected: **12 validated rows per symbol**, with no missing intervals. Raw
 responses go to `data/raw/`; Parquet and quality reports go to `data/processed/`.
 Dates must include a timezone and align with the candle interval. The requested
 range is **start-inclusive and end-exclusive**, in UTC.
+The inspection command explicitly displays UTC, regardless of the computer's
+local timezone.
 
 After that succeeds, the default download fetches the latest seven days of fully
 closed candles (2,016 per symbol if complete):

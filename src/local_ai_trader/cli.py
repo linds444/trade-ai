@@ -94,6 +94,8 @@ def main(argv: list[str] | None = None) -> int:
             if not arguments.path.is_file():
                 raise ValueError(f"Parquet file not found: {arguments.path}")
             with duckdb.connect() as database:
+                # TIMESTAMPTZ display otherwise follows the host's local timezone.
+                database.execute("SET TimeZone = 'UTC'")
                 summary = database.execute(
                     "SELECT symbol, exchange, count(*) AS rows, min(timestamp) AS first_open, "
                     "max(timestamp) AS last_open FROM read_parquet(?) GROUP BY symbol, exchange",

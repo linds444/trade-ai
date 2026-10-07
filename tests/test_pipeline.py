@@ -102,8 +102,21 @@ def test_collection_parquet_and_duckdb_query(monkeypatch, config, capsys):
     assert len(frame) == 12
     assert frame["symbol"].unique().tolist() == ["BTC-USD"]
     assert (frame["available_at"] > frame["timestamp"]).all()
+
+    # Simulate a Windows machine whose DuckDB session defaults to Pacific time.
+    real_connect = cli.duckdb.connect
+
+    def pacific_connection(*args, **kwargs):
+        database = real_connect(*args, **kwargs)
+        database.execute("SET TimeZone = 'America/Los_Angeles'")
+        return database
+
+    monkeypatch.setattr(cli.duckdb, "connect", pacific_connection)
     assert cli.main(["inspect", str(files[0])]) == 0
-    assert "BTC-USD" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "BTC-USD" in output
+    assert "2025-01-01 00:00:00+00:00" in output
+    assert "2025-01-01 00:55:00+00:00" in output
 
 
 def test_gap_saves_evidence_without_parquet(monkeypatch, config):
