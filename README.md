@@ -508,11 +508,89 @@ Keep the 90-day test partitions reserved during model and calibration developmen
 The test suite includes CPU checks and a small CUDA/mixed-precision training and
 checkpoint test. The CUDA test is skipped on machines without an available GPU.
 
+## Temperature calibration
+
+Temperature scaling adjusts probability sharpness with one positive scalar per
+model: `softmax(log(max(p, probability_floor)) / temperature)`. Temperature 1 is
+the identity, temperatures above 1 soften predictions, and temperatures below
+1 sharpen them. The tiny probability floor handles zero scores. Positive
+temperature preserves each row's predicted class, so accuracy and F1 do not
+change; compare log loss, Brier score and reliability data. A fitted temperature
+does not guarantee improvement on a later period or perfect calibration.
+
+Fit a separate calibration bundle for an existing saved run:
+
+```powershell
+& $projectPython -m local_ai_trader calibrate data/models/boosting_BTC-USD_20261008T175708Z_5e9dc4f5
+```
+
+This example uses the verified 90-day BTC XGBoost checkpoint. The command
+supports naive/logistic, XGBoost and MLP runs. It restores model weights and
+preprocessing without fitting them and loads only **validation Parquet**.
+Hashes audit the original manifest/training/validation files. The test Parquet
+is never opened or hashed. Saved models are restored on CPU, so calibration
+does not need another GPU training run.
+
+With `[calibration].fit_fraction = 0.5`, the first half of validation is the
+calibration-fit period and the second half is the assessment period. Fit rows
+whose outcomes reach the first assessment prediction are purged. For each
+90-day asset this leaves **2,581 fit rows**, six labels purged, and **2,587
+assessment rows**. Fit labels are strictly known before assessment begins;
+the original validation-to-test purge is also checked.
+
+SciPy bounded scalar minimization fits temperature using only fit-period log
+loss. Fixed bounds 0.25–4 include temperature 1; identity and both endpoints
+are checked explicitly. Failed optimization stops publication. Assessment
+labels and scores cannot influence temperature fitting, and the command does
+not automatically undo calibration based on assessment results.
+
+The printed table compares raw and adjusted scores on **the same later
+validation rows**. Earlier full-validation tables used 5,174 rows and are not
+directly comparable to this smaller assessment. The later segment already
+contributed to earlier model comparisons, so it is a diagnostic calibration
+assessment, not a fresh independent test. Keep the original 90-day test
+partitions reserved while choosing models and calibration settings.
+
+An immutable `<saved-run>/calibration/` contains:
+
+- `calibration.json`: scalar temperatures, optimizer results, configuration,
+  source/model hashes, purged temporal regions and class counts.
+- `metrics.json`: separate fit-period and assessment metrics for raw and
+  temperature-adjusted predictions.
+- `assessment_<model>_<variant>.parquet`: assessment probabilities and truth.
+
+Metrics retain the existing top-label ECE convention and now also include
+`classwise_calibration_bins`, `classwise_ece` and `classwise_ece_macro`. Each
+class's bin records mean predicted probability, observed event frequency and
+count. These are reliability-curve data: for example, the `up` bins compare
+`p_up` with how often `up` actually occurred. Empty bins have null means; counts
+are not independent sample counts because adjacent horizon labels overlap.
+
+Publication is staged, failed writes leave no partial bundle, and changed
+inputs or model artifacts prevent publication. The original checkpoint,
+weights and experiment metrics are preserved. Repeated calibration or
+calibration after an existing test evaluation is refused. A `--splits` override
+supports relocated datasets only when the original hashes still match.
+
+After all choices are frozen, this optional evaluation mode reports raw and
+saved-temperature predictions together, without fitting any parameter:
+
+```powershell
+& $projectPython -m local_ai_trader evaluate <saved-run-directory> --calibrated
+```
+
+It verifies calibration/model/input hashes and purged fit-label availability,
+ignores current settings, and records the calibration checkpoint hash. Raw
+and calibrated modes share the same immutable `test_evaluation/` destination,
+preventing a second test evaluation. Missing calibration is rejected before
+test data is loaded. Do not run this on reserved test data during development.
+
 ## Next milestones
 
 1. Compare naive, logistic, XGBoost and MLP validation results on the predefined
    90-day research partitions while reserving test data.
-2. Measure and implement calibration with separate calibration/evaluation periods.
+2. Review temperature calibration on purged later-validation assessment periods,
+   then freeze model/calibration choices before the reserved test evaluation.
 3. Add cost-aware backtesting, walk-forward evaluation and local experiment logs.
 4. Add a Transformer only when evidence warrants it, then uncertainty, configurable
    policy, a separate risk gate, paper trading, API and dashboard.

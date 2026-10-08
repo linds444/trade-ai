@@ -1,6 +1,5 @@
-"""Evaluate existing JSON checkpoints on their original held-out test partition."""
+"""Evaluate frozen models and optional saved temperatures on held-out data."""
 
-import json
 import logging
 import os
 from pathlib import Path
@@ -11,109 +10,61 @@ import numpy as np
 import pandas as pd
 
 from local_ai_trader.data.storage import write_json, write_parquet
-from local_ai_trader.data.validate import validate_candle_timeline
 from local_ai_trader.features.build_features import FEATURE_COLUMNS
-from local_ai_trader.models.baseline import CLASS_NAMES, encode_labels, feature_matrix, predict_checkpoint
+from local_ai_trader.models.baseline import CLASS_NAMES
 from local_ai_trader.models.evaluate import evaluate_probabilities
+from local_ai_trader.models.inference import load_frozen_partition, predict_frozen_models, verify_frozen_inputs
 from local_ai_trader.models.train import file_digest
-from local_ai_trader.settings import positive_integer
 
 LOGGER = logging.getLogger(__name__)
 
 
-def evaluate_heldout(run_directory: Path, split_directory: Path | None = None) -> tuple[Path, dict]:
-    """Use saved weights/scaling only; publish one immutable test evaluation.
+def evaluate_heldout(run_directory: Path, split_directory: Path | None = None, calibrated: bool = False) -> tuple[Path, dict]:
+    """Use saved weights/scaling/temperatures only; publish one test evaluation.
 
-    Current settings.toml is intentionally not read: model parameters,
-    preprocessing, label horizon and metric binning come from the frozen run.
-    An optional split-directory override supports moving a saved bundle without
-    relaxing the hashes identifying its training/validation inputs and manifest.
+    Current settings are not read and no parameter is fitted. Calibrated mode
+    reports raw and temperature-adjusted predictions together. Both modes use
+    the same immutable output directory, preventing a second test evaluation.
     """
     output = run_directory / "test_evaluation"
     if output.exists():
         raise ValueError("Test evaluation already saved; inspect test_evaluation/metrics.json")
-    checkpoint_path = run_directory / "checkpoint.json"
-    checkpoint_hash = file_digest(checkpoint_path)
-    with checkpoint_path.open(encoding="utf-8") as source:
-        checkpoint = json.load(source)
+    calibration_path = run_directory / "calibration" / "calibration.json"
+    if calibrated and not calibration_path.is_file():
+        raise ValueError("Saved calibration required; calibrate before evaluating test data")
+    snapshot = load_frozen_partition(run_directory, "test", split_directory)
+    checkpoint, frame = snapshot.checkpoint, snapshot.frame
     metadata = checkpoint["training_metadata"]
-    parameters = metadata["settings"]
-    seconds = positive_integer(parameters["candle_seconds"], "candle_seconds")
-    horizon = positive_integer(parameters["horizon_steps"], "horizon_steps")
-    bins = positive_integer(parameters["calibration_bins"], "calibration_bins")
-    directory = Path(metadata["source_split_directory"]) if split_directory is None else split_directory
-    hashes = metadata["input_hashes"]
-    for name in ("split.json", "train.parquet", "validation.parquet"):
-        if file_digest(directory / name) != hashes[name]:
-            raise ValueError(f"{name} differs from the frozen training experiment")
-    with (directory / "split.json").open(encoding="utf-8") as source:
-        split_report = json.load(source)
-    if split_report.get("feature_names") != list(FEATURE_COLUMNS):
-        raise ValueError("Incompatible test feature allowlist")
-    test_path = directory / "test.parquet"
-    test_hash = file_digest(test_path)
-    frame = validate_candle_timeline(pd.read_parquet(test_path), seconds)
-    feature_matrix(frame)
-    encode_labels(frame["target_class"])
-    if not pd.api.types.is_numeric_dtype(frame["target_return"]) or pd.api.types.is_bool_dtype(frame["target_return"]) or not np.isfinite(frame["target_return"].to_numpy(dtype=float, na_value=np.nan)).all():
-        raise ValueError("Test returns must be numeric and finite")
-    known_at = frame["target_available_at"]
-    if known_at.isna().any() or getattr(known_at.dtype, "tz", None) is None:
-        raise ValueError("Test target availability must contain timezone-aware datetimes")
-    frame["target_available_at"] = known_at.dt.tz_convert("UTC")
-    if not frame["target_available_at"].eq(frame["available_at"] + pd.to_timedelta(horizon * seconds, unit="s")).all():
-        raise ValueError("Test labels do not match the frozen horizon")
-    if frame["target_available_at"].max() > pd.Timestamp.now(tz="UTC"):
-        raise ValueError("Test outcomes are not yet available")
-    summary = split_report["partitions"]["test"]
-    if len(frame) != summary["rows"]:
-        raise ValueError("Test row count does not match the original split")
-    for key, actual in (
-        ("first_prediction_time", frame["available_at"].iloc[0]),
-        ("last_prediction_time", frame["available_at"].iloc[-1]),
-        ("last_label_known_at", frame["target_available_at"].iloc[-1]),
-    ):
-        if pd.Timestamp(summary[key]) != actual:
-            raise ValueError(f"Test {key} does not match the original split")
-    if pd.Timestamp(split_report["test_first_prediction_time"]) != frame["available_at"].iloc[0]:
-        raise ValueError("Test start does not match the original split boundary")
-    if summary["class_counts"] != {label: int(frame["target_class"].eq(label).sum()) for label in CLASS_NAMES}:
-        raise ValueError("Test class counts do not match the original split")
-    if frame["symbol"].iloc[0] != metadata["symbol"] or frame["exchange"].iloc[0] != metadata["exchange"]:
-        raise ValueError("Test market does not match the frozen checkpoint")
-    model_hashes = {}
-    if checkpoint.get("model_type") == "xgboost":
-        from local_ai_trader.models.boosting import MODEL_FILENAME, predict_boosting_checkpoint
+    probabilities, model_hashes = predict_frozen_models(checkpoint, frame, run_directory)
+    calibration_hash = None
+    adjusted_names = set()
+    if calibrated:
+        from local_ai_trader.calibration.run import apply_saved_calibration
 
-        probabilities = predict_boosting_checkpoint(checkpoint, frame, run_directory)
-        model_hashes[MODEL_FILENAME] = checkpoint["model_sha256"]
-    elif checkpoint.get("model_type") == "mlp":
-        from local_ai_trader.models.mlp import MODEL_FILENAME, predict_mlp_checkpoint
-
-        probabilities = predict_mlp_checkpoint(checkpoint, frame, run_directory)
-        model_hashes[MODEL_FILENAME] = checkpoint["model_sha256"]
-    elif checkpoint.get("model_type") is None:
-        probabilities = predict_checkpoint(checkpoint, frame)
-    else:
-        raise ValueError("Unsupported frozen checkpoint model type")
-    metrics = {model: evaluate_probabilities(frame["target_class"], values, bins) for model, values in probabilities.items()}
+        adjusted, calibration_hash = apply_saved_calibration(run_directory, snapshot, probabilities, model_hashes)
+        for model, values in adjusted.items():
+            name = f"{model}_temperature"
+            probabilities[name] = values
+            adjusted_names.add(name)
+    metrics = {}
+    for model, values in probabilities.items():
+        metrics[model] = evaluate_probabilities(frame["target_class"], values, snapshot.bins)
+        if model in adjusted_names:
+            metrics[model]["calibration_status"] = "temperature_scaled"
     report = {
         "schema_version": 1, "created_at": pd.Timestamp.now(tz="UTC").isoformat(),
         "partition": "test", "run_id": metadata["run_id"], "rows": len(frame),
-        "checkpoint_sha256": checkpoint_hash, "split_manifest_sha256": hashes["split.json"],
-        "test_parquet_sha256": test_hash,
-        "split_directory": str(directory.resolve()), "refitted": False,
+        "checkpoint_sha256": snapshot.checkpoint_hash,
+        "split_manifest_sha256": metadata["input_hashes"]["split.json"],
+        "test_parquet_sha256": snapshot.parquet_hash,
+        "split_directory": str(snapshot.directory.resolve()), "refitted": False,
         "feature_names": list(FEATURE_COLUMNS), "class_names": list(CLASS_NAMES),
-        "calibration_status": checkpoint["calibration"], "metrics": metrics,
-        "model_artifact_hashes": model_hashes,
+        "calibration_status": "raw_and_temperature_scaled" if calibrated else checkpoint["calibration"],
+        "metrics": metrics, "model_artifact_hashes": model_hashes,
+        "calibration_checkpoint_sha256": calibration_hash,
+        "calibration_fitted_during_evaluation": False,
     }
-    if file_digest(checkpoint_path) != checkpoint_hash:
-        raise ValueError("Checkpoint changed during evaluation; no results published")
-    if file_digest(test_path) != test_hash:
-        raise ValueError("Test dataset changed during evaluation; no results published")
-    for filename, digest in model_hashes.items():
-        if file_digest(run_directory / filename) != digest:
-            raise ValueError("Model artifact changed during evaluation; no results published")
+    verify_frozen_inputs(snapshot, run_directory, model_hashes)
     staging = Path(tempfile.mkdtemp(prefix=".test-staging-", dir=run_directory))
     try:
         write_json(staging / "metrics.json", report)
@@ -124,12 +75,16 @@ def evaluate_heldout(run_directory: Path, split_directory: Path | None = None) -
             predicted["predicted_class"] = np.array(CLASS_NAMES)[values.argmax(axis=1)]
             predicted["max_probability"] = values.max(axis=1)
             write_parquet(staging / f"{model}.parquet", predicted)
+        verify_frozen_inputs(snapshot, run_directory, model_hashes)
+        if calibrated and file_digest(calibration_path) != calibration_hash:
+            raise ValueError("Calibration changed during evaluation; no results published")
         os.rename(staging, output)
     finally:
         if staging.exists():
             shutil.rmtree(staging)
     LOGGER.info("Evaluated %s held-out test rows using saved parameters; no fitting", len(frame))
-    print("Held-out test metrics (probabilities are uncalibrated):")
+    description = "raw and temperature-scaled probabilities" if calibrated else "probabilities are uncalibrated"
+    print(f"Held-out test metrics ({description}):")
     print(pd.DataFrame([
         {"model": model, **{key: metrics[model][key] for key in ("accuracy", "f1_macro", "log_loss", "brier_score", "ece")}}
         for model in metrics

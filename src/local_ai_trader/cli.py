@@ -108,9 +108,14 @@ def main(argv: list[str] | None = None) -> int:
     mlp = commands.add_parser("mlp", help="Train a small PyTorch MLP; evaluate validation only")
     mlp.add_argument("path", type=Path, help="Directory containing purged splits and split.json")
     mlp.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    calibrate = commands.add_parser("calibrate", help="Fit temperature on earlier validation; assess later validation")
+    calibrate.add_argument("path", type=Path, help="Saved model experiment directory")
+    calibrate.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    calibrate.add_argument("--splits", type=Path, help="Override split location while verifying original input hashes")
     evaluate = commands.add_parser("evaluate", help="Evaluate a frozen baseline run on its held-out test data")
     evaluate.add_argument("path", type=Path, help="Saved baseline experiment directory")
     evaluate.add_argument("--splits", type=Path, help="Override split location while verifying original input hashes")
+    evaluate.add_argument("--calibrated", action="store_true", help="Report raw and saved-temperature predictions without fitting")
     arguments = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
@@ -136,8 +141,12 @@ def main(argv: list[str] | None = None) -> int:
                     raise ValueError("PyTorch is required for mlp; use the verified CUDA environment") from error
                 raise
             train_mlp_experiment(arguments.path, load_settings(arguments.config))
+        elif arguments.command == "calibrate":
+            from local_ai_trader.calibration.run import create_calibration
+
+            create_calibration(arguments.path, load_settings(arguments.config).calibration, arguments.splits)
         elif arguments.command == "evaluate":
-            evaluate_heldout(arguments.path, arguments.splits)
+            evaluate_heldout(arguments.path, arguments.splits, calibrated=arguments.calibrated)
         else:
             if not arguments.path.is_file():
                 raise ValueError(f"Parquet file not found: {arguments.path}")

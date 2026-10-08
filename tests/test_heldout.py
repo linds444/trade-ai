@@ -151,27 +151,27 @@ def test_failed_write_leaves_no_partial_test_evaluation(experiment, monkeypatch)
 
 def test_checkpoint_change_during_evaluation_is_rejected(experiment, monkeypatch):
     run, _, _ = experiment
-    original_predict = heldout.predict_checkpoint
+    original_predict = heldout.predict_frozen_models
 
-    def changed(checkpoint, frame):
+    def changed(checkpoint, frame, directory):
         with (run / "checkpoint.json").open("ab") as source:
             source.write(b" ")
-        return original_predict(checkpoint, frame)
+        return original_predict(checkpoint, frame, directory)
 
-    monkeypatch.setattr(heldout, "predict_checkpoint", changed)
+    monkeypatch.setattr(heldout, "predict_frozen_models", changed)
     with pytest.raises(ValueError, match="Checkpoint changed"):
         evaluate_heldout(run)
 
 
 def test_test_data_change_during_evaluation_is_rejected(experiment, monkeypatch):
     run, splits, _ = experiment
-    original_predict = heldout.predict_checkpoint
+    original_predict = heldout.predict_frozen_models
 
-    def changed(checkpoint, frame):
+    def changed(checkpoint, frame, directory):
         with (splits / "test.parquet").open("ab") as source:
             source.write(b" ")
-        return original_predict(checkpoint, frame)
+        return original_predict(checkpoint, frame, directory)
 
-    monkeypatch.setattr(heldout, "predict_checkpoint", changed)
+    monkeypatch.setattr(heldout, "predict_frozen_models", changed)
     with pytest.raises(ValueError, match="Test dataset changed"):
         evaluate_heldout(run)

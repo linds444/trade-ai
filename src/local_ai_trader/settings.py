@@ -32,6 +32,16 @@ class MLPSettings:
 
 
 @dataclass(frozen=True)
+class CalibrationSettings:
+    fit_fraction: float = 0.5
+    min_temperature: float = 0.25
+    max_temperature: float = 4.0
+    probability_floor: float = 1e-12
+    optimizer_tolerance: float = 1e-6
+    max_iterations: int = 200
+
+
+@dataclass(frozen=True)
 class Settings:
     symbols: tuple[str, ...]
     candle_seconds: int
@@ -55,6 +65,24 @@ class Settings:
     models_dir: Path
     boosting: BoostingSettings = field(default_factory=BoostingSettings)
     mlp: MLPSettings = field(default_factory=MLPSettings)
+    calibration: CalibrationSettings = field(default_factory=CalibrationSettings)
+
+
+def load_calibration_settings(config: dict) -> CalibrationSettings:
+    defaults = CalibrationSettings()
+    values = {name: config.get(name, getattr(defaults, name)) for name in defaults.__dataclass_fields__}
+    for name in ("fit_fraction", "min_temperature", "max_temperature", "probability_floor", "optimizer_tolerance"):
+        value = values[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"calibration.{name} must be a positive finite number")
+    if values["fit_fraction"] >= 1:
+        raise ValueError("calibration.fit_fraction must be below 1")
+    if not values["min_temperature"] <= 1 <= values["max_temperature"] or values["min_temperature"] >= values["max_temperature"]:
+        raise ValueError("Temperature bounds must be ordered and contain 1")
+    if values["probability_floor"] > 1e-6:
+        raise ValueError("calibration.probability_floor must be at most 1e-6")
+    positive_integer(values["max_iterations"], "calibration.max_iterations")
+    return CalibrationSettings(**values)
 
 
 def load_mlp_settings(config: dict) -> MLPSettings:
@@ -176,4 +204,5 @@ def load_settings(path: Path) -> Settings:
         models_dir=root / paths["models"],
         boosting=load_boosting_settings(config.get("boosting", {})),
         mlp=load_mlp_settings(config.get("mlp", {})),
+        calibration=load_calibration_settings(config.get("calibration", {})),
     )
