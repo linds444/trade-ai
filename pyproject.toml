@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
+neural = ["torch>=2.11,<2.12"]
 
 [project.scripts]
 trade-ai = "local_ai_trader.cli:main"

@@ -33,6 +33,19 @@ min_child_weight = 5.0
 reg_lambda = 5.0
 n_jobs = 4
 
+[mlp]
+hidden_sizes = [64, 32]
+dropout = 0.1
+epochs = 30
+batch_size = 256
+learning_rate = 0.001
+weight_decay = 0.001
+grad_clip_norm = 1.0
+# GPU training is explicit; a missing CUDA environment stops the run.
+device = "cuda"
+mixed_precision = true
+cpu_threads = 4
+
 [download]
 lookback_days = 7
 timeout_seconds = 30

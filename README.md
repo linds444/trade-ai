@@ -448,11 +448,71 @@ results are saved once under `test_evaluation/`, including the model artifact
 hash. It preserves the original run files. Do not evaluate the reserved test
 partition during candidate development.
 
+## First PyTorch MLP
+
+The `mlp` command trains a small feedforward classifier on the same eight
+features and purged partitions used by the classical baselines:
+
+```powershell
+& $projectPython -m local_ai_trader mlp data/processed/splits/coinbase_BTC-USD_300s_1782864000_1790640000_h6_features
+```
+
+Use the existing environment whose PyTorch 2.11.0+cu128 build was verified on the
+RTX 3060. PyTorch remains optional for data/classical-model commands; it is not
+reinstalled by `requirements-dev.txt`. For a new GPU environment, the separate
+`requirements-gpu.txt` specifies the verified CUDA build. The generic `neural`
+extra declares compatible PyTorch versions without selecting a CUDA build.
+
+The initial network has hidden widths 64 and 32, ReLU activations, dropout 0.1,
+and three output logits (2,755 trainable parameters). Settings under `[mlp]`
+specify 30 epochs, batch size 256, AdamW learning rate 0.001, weight decay 0.001
+and gradient clipping at norm 1. These are fixed starting settings, not selected
+using test data. No validation early stopping or best-validation checkpoint
+selection occurs: the saved model is the final fixed-epoch model.
+
+`StandardScaler` fits only on training inputs, including its treatment of
+constant/nearly constant features. The checkpoint stores the resulting mean,
+scale and variance in input order; inference never fits a scaler. Training
+batches follow chronological order. All three training classes must be present.
+Initialization and dropout are seeded; deterministic PyTorch algorithms are
+enabled with the required CUDA workspace setting. Exact reproduction across
+different devices, library versions or CUDA builds is not promised.
+
+GPU training is explicit (`device = "cuda"`): unavailable CUDA stops the run
+instead of silently training on CPU. Mixed precision uses CUDA float16 autocast
+and gradient scaling. Scaling-overflow steps are skipped and counted in the
+training history; nonfinite loss or model weights stop publication. An explicit
+`device = "cpu"` supports CPU verification, with mixed precision disabled.
+
+Each epoch logs training loss. The saved experiment records epoch history,
+training device, actual mixed-precision use, GPU name/peak allocated tensor
+memory where available, seed, package versions and dataset hashes. Validation
+metrics use full-precision inference and float64 softmax; scores are still
+**uncalibrated**. This small model verifies the neural/GPU pipeline; a GPU or a
+neural network does not establish a performance advantage.
+
+A new `data/models/mlp_<symbol>_<run-id>/` contains `mlp_state.pt` (tensor state
+dictionary), `checkpoint.json`, `experiment.json`, `metrics.json` and
+`validation_mlp.parquet`. The model state is restored using
+`torch.load(..., weights_only=True)` with strict layer matching, and restored
+predictions must match the fitted model before staged publication. Training
+never opens or hashes test Parquet. Changing validation data cannot change
+normalization or weights; changed inputs or failed writes leave no partial run.
+
+After choices are frozen, `evaluate <saved-run-directory>` supports the MLP
+without fitting or reading current settings. Frozen evaluation defaults to CPU
+for portability and records the state-file hash. The inference helper also
+accepts an explicit CUDA device. Original experiment files remain unchanged.
+Keep the 90-day test partitions reserved during model and calibration development.
+
+The test suite includes CPU checks and a small CUDA/mixed-precision training and
+checkpoint test. The CUDA test is skipped on machines without an available GPU.
+
 ## Next milestones
 
-1. Compare naive, logistic and XGBoost validation results on the predefined
+1. Compare naive, logistic, XGBoost and MLP validation results on the predefined
    90-day research partitions while reserving test data.
-2. Add a small GPU MLP; measure calibration separately.
+2. Measure and implement calibration with separate calibration/evaluation periods.
 3. Add cost-aware backtesting, walk-forward evaluation and local experiment logs.
 4. Add a Transformer only when evidence warrants it, then uncertainty, configurable
    policy, a separate risk gate, paper trading, API and dashboard.

@@ -87,6 +87,11 @@ def evaluate_heldout(run_directory: Path, split_directory: Path | None = None) -
 
         probabilities = predict_boosting_checkpoint(checkpoint, frame, run_directory)
         model_hashes[MODEL_FILENAME] = checkpoint["model_sha256"]
+    elif checkpoint.get("model_type") == "mlp":
+        from local_ai_trader.models.mlp import MODEL_FILENAME, predict_mlp_checkpoint
+
+        probabilities = predict_mlp_checkpoint(checkpoint, frame, run_directory)
+        model_hashes[MODEL_FILENAME] = checkpoint["model_sha256"]
     elif checkpoint.get("model_type") is None:
         probabilities = predict_checkpoint(checkpoint, frame)
     else:
