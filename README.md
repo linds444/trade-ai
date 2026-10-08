@@ -3,7 +3,8 @@
 A local, Windows-first market research project for an NVIDIA RTX 3060 (12 GB).
 The current milestone collects and validates historical data, builds
 forward-return targets, computes causal features, and creates purged chronological
-splits, and compares naive/logistic probability baselines on validation data.
+splits, and compares naive/logistic probability baselines on validation and
+held-out test data using separate commands.
 It does not yet make trading recommendations or execute orders.
 
 ## Verified starting environment
@@ -136,6 +137,8 @@ settings compatibility and cleanup after a failed bundle write.
 Baseline tests verify train-only scaling, class probability order, JSON inference
 round trips, known metric values, failure cleanup, and that validation experiments
 can run with an unreadable held-out test file.
+Held-out tests forbid scaler/classifier fitting, preserve original experiment
+files, verify frozen input hashes and reject partial or repeated publication.
 
 Core dependencies have compatibility ranges. After a verified installation,
 record its exact resolved versions for local reproducibility:
@@ -350,10 +353,43 @@ Validation improvement alone establishes neither held-out performance nor
 trading profitability. Keep the naive baseline and freeze choices before using
 the test set; do not tune repeatedly against it.
 
+## Frozen held-out evaluation
+
+After recording validation results and freezing model/feature choices, evaluate
+an existing model run on its original held-out test dataset:
+
+```powershell
+& $projectPython -m local_ai_trader evaluate data/models/baseline_BTC-USD_20261008T021502Z_d48a8cad
+```
+
+The example matches the user's verified BTC checkpoint. This command uses its
+saved coefficients, normalization statistics, feature/class order, horizon and
+metric settings. It does not read the current configuration, fit a scaler, train
+a classifier or select parameters. It verifies hashes of the original split
+manifest and training/validation inputs before loading the test partition.
+
+For the verified seven-day dataset, both baselines evaluate **400 test rows**.
+Outputs appear in the existing model run's `test_evaluation/` directory:
+`metrics.json`, `naive.parquet` and `logistic.parquet`. The report identifies the
+checkpoint and test-data hashes, states `partition = test` and `refitted = false`,
+and preserves the original training and validation artifacts. The original
+training report's `test.evaluated = false` remains a historical record; current
+test results live in the separate evaluation directory.
+
+The full result is staged before publication; an existing test-evaluation
+directory prevents repeated execution or overwrite. To move saved datasets,
+use `--splits <directory>`; the original hashes must still match.
+
+Examining these outcomes consumes this engineering holdout. Further model
+selection must use training/validation data, followed by fresh unseen data or a
+new predefined research split. Do not repeatedly adjust the model against this
+same test period. These probability metrics remain distinct from backtesting,
+paper trading or live returns, and the probabilities remain uncalibrated.
+
 ## Next milestones
 
-1. Review baseline validation results, collect a longer research dataset, and
-   evaluate frozen choices on held-out data before expanding to walk-forward runs.
+1. Review the frozen baseline results, collect a longer research dataset and
+   define new evaluation periods before expanding to walk-forward runs.
 2. Compare gradient boosting and a small GPU MLP; measure calibration separately.
 3. Add cost-aware backtesting, walk-forward evaluation and local experiment logs.
 4. Add a Transformer only when evidence warrants it, then uncertainty, configurable

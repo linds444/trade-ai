@@ -16,6 +16,7 @@ from local_ai_trader.features.build_features import create_feature_dataset
 from local_ai_trader.data.storage import write_json, write_parquet
 from local_ai_trader.settings import load_settings, validate_symbol
 from local_ai_trader.models.train import train_baseline_experiment
+from local_ai_trader.models.heldout import evaluate_heldout
 
 LOGGER = logging.getLogger(__name__)
 
@@ -101,6 +102,9 @@ def main(argv: list[str] | None = None) -> int:
     baseline = commands.add_parser("baseline", help="Fit naive/logistic models; evaluate validation only")
     baseline.add_argument("path", type=Path, help="Directory containing purged splits and split.json")
     baseline.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    evaluate = commands.add_parser("evaluate", help="Evaluate a frozen baseline run on its held-out test data")
+    evaluate.add_argument("path", type=Path, help="Saved baseline experiment directory")
+    evaluate.add_argument("--splits", type=Path, help="Override split location while verifying original input hashes")
     arguments = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
@@ -114,6 +118,8 @@ def main(argv: list[str] | None = None) -> int:
             create_split_dataset(arguments.path, load_settings(arguments.config))
         elif arguments.command == "baseline":
             train_baseline_experiment(arguments.path, load_settings(arguments.config))
+        elif arguments.command == "evaluate":
+            evaluate_heldout(arguments.path, arguments.splits)
         else:
             if not arguments.path.is_file():
                 raise ValueError(f"Parquet file not found: {arguments.path}")
