@@ -3,8 +3,8 @@
 A local, Windows-first market research project for an NVIDIA RTX 3060 (12 GB).
 The current milestone collects and validates historical data, builds
 forward-return targets, computes causal features, and creates purged chronological
-splits. It does not yet train a model, make trading
-recommendations, or execute orders.
+splits, and compares naive/logistic probability baselines on validation data.
+It does not yet make trading recommendations or execute orders.
 
 ## Verified starting environment
 
@@ -133,6 +133,9 @@ candles, truncate future history, change target values, check zero-volume and
 flat candles, and validate dataset provenance and immutable storage.
 Split tests check strict label boundaries, chronological ordering, row accounting,
 settings compatibility and cleanup after a failed bundle write.
+Baseline tests verify train-only scaling, class probability order, JSON inference
+round trips, known metric values, failure cleanup, and that validation experiments
+can run with an unreadable held-out test file.
 
 Core dependencies have compatibility ranges. After a verified installation,
 record its exact resolved versions for local reproducibility:
@@ -271,16 +274,86 @@ positions, purged prediction times, class counts and availability bounds.
 All files are staged and then published as one directory; failed writes do not
 leave a partially published split bundle. Existing bundles cannot be overwritten.
 
-No scalers or models are fitted. The upcoming baseline must fit preprocessing
-and model parameters only on the training file, use validation for model
-selection, and reserve the test file for evaluation of frozen choices. Seven
+The split command fits no scalers or models. The baseline command fits preprocessing
+and model parameters only on the training file and reports validation metrics;
+the test file is reserved for evaluation of frozen choices. Seven
 days is an engineering sample, not sufficient evidence of predictive stability
 or trading profitability. Longer history and walk-forward evaluation follow.
 
+## First probability baselines
+
+After pulling this milestone, install its new scikit-learn dependency from the
+repository root. Use the already verified Python environment if reusing it:
+
+```powershell
+& $projectPython -m pip install -r requirements-dev.txt
+& $projectPython -m pytest -q
+```
+
+Fit and compare models for one asset's verified split directory:
+
+```powershell
+& $projectPython -m local_ai_trader baseline data/processed/splits/coinbase_BTC-USD_300s_1790804400_1791409200_h6_features
+```
+
+The command fits two baselines on the training rows:
+
+- **Naive:** constant class probabilities estimated from training counts, with
+  a configurable Laplace pseudocount (`naive_smoothing = 1.0`). This avoids zero
+  probability for a class absent from that training period.
+- **Logistic regression:** `StandardScaler` fitted on training features, followed
+  by a regularized classifier (`C = 1.0`, `lbfgs`, seed 42). Parameters live under
+  `[baseline]` in `config/settings.toml`. Validation data is only transformed,
+  never used to fit the scaler or model. Training needs at least two classes;
+  a missing third class receives zero classifier probability. Failed convergence
+  stops the run instead of publishing a checkpoint.
+
+Both models produce ordered `p_up`, `p_down`, `p_flat` distributions. These small
+classical models run on the CPU; GPU training comes with the custom PyTorch model.
+The experiment reads only `train.parquet`, `validation.parquet` and `split.json`.
+It verifies the manifest, availability boundaries and model-input allowlist.
+**The held-out test Parquet is never opened or hashed by this command.**
+
+The printed table reports validation accuracy, macro F1, log loss, Brier score
+and expected calibration error. JSON metrics also include per-class precision,
+recall/F1, one-vs-rest ROC-AUC where defined, and reliability-bin data. Train and
+validation results are stored separately; test results are explicitly unevaluated.
+Lower log loss and Brier score are the primary initial evidence of improvement
+over the naive baseline, to be checked later across longer unseen periods.
+
+Metric conventions are recorded in the output:
+
+- Multiclass Brier score is the mean **sum** of squared errors over all three
+  classes (range 0–2), rather than a mean over classes.
+- ECE uses the most probable class, equal-width confidence bins and empirical
+  top-class accuracy; the final bin includes probability 1. It is not a separate
+  calibration guarantee for each individual class probability.
+- ROC-AUC is null for a class whose validation truth has only one outcome.
+  The three-class macro AUC is null if any component is undefined.
+- Probabilities remain **uncalibrated**. A maximum score is saved as
+  `max_probability`, not presented as reliable confidence. No calibration model,
+  trading policy, expected-return regressor or backtest is implemented yet.
+
+Each run publishes a new directory under `data/models/baseline_<symbol>_<run-id>/`
+containing `checkpoint.json`, `experiment.json`, `metrics.json`,
+`validation_naive.parquet` and `validation_logistic.parquet`. It records the
+dataset provenance, input hashes, feature/class order, settings, seed, package
+versions and timings. The JSON checkpoint includes model coefficients, intercepts
+and fitted normalization statistics, and its inference is checked against the
+fitted sklearn pipeline before publishing. A future inference step must use these
+saved statistics, not refit preprocessing. Publication is staged so a failed write
+does not leave a partially published model run.
+
+Seven days is still an engineering sample. Adjacent 30-minute labels overlap
+within each partition, so candle counts are not independent outcome counts.
+Validation improvement alone establishes neither held-out performance nor
+trading profitability. Keep the naive baseline and freeze choices before using
+the test set; do not tune repeatedly against it.
+
 ## Next milestones
 
-1. Compare a naive baseline and logistic regression with train-only preprocessing
-   and separate validation/test metrics.
+1. Review baseline validation results, collect a longer research dataset, and
+   evaluate frozen choices on held-out data before expanding to walk-forward runs.
 2. Compare gradient boosting and a small GPU MLP; measure calibration separately.
 3. Add cost-aware backtesting, walk-forward evaluation and local experiment logs.
 4. Add a Transformer only when evidence warrants it, then uncertainty, configurable

@@ -17,12 +17,18 @@ class Settings:
     rolling_window: int
     train_fraction: float
     validation_fraction: float
+    random_seed: int
+    logistic_c: float
+    logistic_max_iter: int
+    naive_smoothing: float
+    calibration_bins: int
     lookback_days: int
     timeout_seconds: int
     max_attempts: int
     request_pause_seconds: float
     raw_dir: Path
     processed_dir: Path
+    models_dir: Path
 
 
 def validate_symbol(symbol: str) -> str:
@@ -79,6 +85,14 @@ def load_settings(path: Path) -> Settings:
     train_fraction, validation_fraction = validate_split_fractions(
         config["split"]["train_fraction"], config["split"]["validation_fraction"],
     )
+    baseline = config["baseline"]
+    for key in ("logistic_c", "naive_smoothing"):
+        value = baseline[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{key} must be a positive finite number")
+    seed = baseline["random_seed"]
+    if type(seed) is not int or not 0 <= seed < 2**32:
+        raise ValueError("random_seed must be an integer in [0, 2**32)")
     return Settings(
         symbols=tuple(validate_symbol(s) for s in symbols),
         candle_seconds=seconds,
@@ -88,10 +102,16 @@ def load_settings(path: Path) -> Settings:
         rolling_window=rolling_window,
         train_fraction=train_fraction,
         validation_fraction=validation_fraction,
+        random_seed=seed,
+        logistic_c=float(baseline["logistic_c"]),
+        logistic_max_iter=positive_integer(baseline["logistic_max_iter"], "logistic_max_iter"),
+        naive_smoothing=float(baseline["naive_smoothing"]),
+        calibration_bins=positive_integer(baseline["calibration_bins"], "calibration_bins"),
         lookback_days=positive_integer(download["lookback_days"], "lookback_days"),
         timeout_seconds=positive_integer(download["timeout_seconds"], "timeout_seconds"),
         max_attempts=positive_integer(download["max_attempts"], "max_attempts"),
         request_pause_seconds=pause,
         raw_dir=root / paths["raw"],
         processed_dir=root / paths["processed"],
+        models_dir=root / paths["models"],
     )
