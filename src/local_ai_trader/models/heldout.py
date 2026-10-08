@@ -81,7 +81,21 @@ def evaluate_heldout(run_directory: Path, split_directory: Path | None = None) -
         raise ValueError("Test class counts do not match the original split")
     if frame["symbol"].iloc[0] != metadata["symbol"] or frame["exchange"].iloc[0] != metadata["exchange"]:
         raise ValueError("Test market does not match the frozen checkpoint")
-    probabilities = predict_checkpoint(checkpoint, frame)
+    model_hashes = {}
+    if checkpoint.get("model_type") == "xgboost":
+        from local_ai_trader.models.boosting import MODEL_FILENAME, predict_boosting_checkpoint
+
+        probabilities = predict_boosting_checkpoint(checkpoint, frame, run_directory)
+        model_hashes[MODEL_FILENAME] = checkpoint["model_sha256"]
+    elif checkpoint.get("model_type") == "mlp":
+        from local_ai_trader.models.mlp import MODEL_FILENAME, predict_mlp_checkpoint
+
+        probabilities = predict_mlp_checkpoint(checkpoint, frame, run_directory)
+        model_hashes[MODEL_FILENAME] = checkpoint["model_sha256"]
+    elif checkpoint.get("model_type") is None:
+        probabilities = predict_checkpoint(checkpoint, frame)
+    else:
+        raise ValueError("Unsupported frozen checkpoint model type")
     metrics = {model: evaluate_probabilities(frame["target_class"], values, bins) for model, values in probabilities.items()}
     report = {
         "schema_version": 1, "created_at": pd.Timestamp.now(tz="UTC").isoformat(),
@@ -91,11 +105,15 @@ def evaluate_heldout(run_directory: Path, split_directory: Path | None = None) -
         "split_directory": str(directory.resolve()), "refitted": False,
         "feature_names": list(FEATURE_COLUMNS), "class_names": list(CLASS_NAMES),
         "calibration_status": checkpoint["calibration"], "metrics": metrics,
+        "model_artifact_hashes": model_hashes,
     }
     if file_digest(checkpoint_path) != checkpoint_hash:
         raise ValueError("Checkpoint changed during evaluation; no results published")
     if file_digest(test_path) != test_hash:
         raise ValueError("Test dataset changed during evaluation; no results published")
+    for filename, digest in model_hashes.items():
+        if file_digest(run_directory / filename) != digest:
+            raise ValueError("Model artifact changed during evaluation; no results published")
     staging = Path(tempfile.mkdtemp(prefix=".test-staging-", dir=run_directory))
     try:
         write_json(staging / "metrics.json", report)
@@ -114,7 +132,7 @@ def evaluate_heldout(run_directory: Path, split_directory: Path | None = None) -
     print("Held-out test metrics (probabilities are uncalibrated):")
     print(pd.DataFrame([
         {"model": model, **{key: metrics[model][key] for key in ("accuracy", "f1_macro", "log_loss", "brier_score", "ece")}}
-        for model in ("naive", "logistic")
+        for model in metrics
     ]).to_string(index=False))
     LOGGER.info("Saved held-out evaluation to %s", output)
     return output, report

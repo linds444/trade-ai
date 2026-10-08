@@ -102,6 +102,12 @@ def main(argv: list[str] | None = None) -> int:
     baseline = commands.add_parser("baseline", help="Fit naive/logistic models; evaluate validation only")
     baseline.add_argument("path", type=Path, help="Directory containing purged splits and split.json")
     baseline.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    boosting = commands.add_parser("boosting", help="Fit a fixed XGBoost model; evaluate validation only")
+    boosting.add_argument("path", type=Path, help="Directory containing purged splits and split.json")
+    boosting.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    mlp = commands.add_parser("mlp", help="Train a small PyTorch MLP; evaluate validation only")
+    mlp.add_argument("path", type=Path, help="Directory containing purged splits and split.json")
+    mlp.add_argument("--config", type=Path, default=Path("config/settings.toml"))
     evaluate = commands.add_parser("evaluate", help="Evaluate a frozen baseline run on its held-out test data")
     evaluate.add_argument("path", type=Path, help="Saved baseline experiment directory")
     evaluate.add_argument("--splits", type=Path, help="Override split location while verifying original input hashes")
@@ -118,6 +124,18 @@ def main(argv: list[str] | None = None) -> int:
             create_split_dataset(arguments.path, load_settings(arguments.config))
         elif arguments.command == "baseline":
             train_baseline_experiment(arguments.path, load_settings(arguments.config))
+        elif arguments.command == "boosting":
+            from local_ai_trader.models.boosting import train_boosting_experiment
+
+            train_boosting_experiment(arguments.path, load_settings(arguments.config))
+        elif arguments.command == "mlp":
+            try:
+                from local_ai_trader.models.mlp import train_mlp_experiment
+            except ModuleNotFoundError as error:
+                if error.name == "torch":
+                    raise ValueError("PyTorch is required for mlp; use the verified CUDA environment") from error
+                raise
+            train_mlp_experiment(arguments.path, load_settings(arguments.config))
         elif arguments.command == "evaluate":
             evaluate_heldout(arguments.path, arguments.splits)
         else:

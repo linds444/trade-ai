@@ -386,11 +386,133 @@ new predefined research split. Do not repeatedly adjust the model against this
 same test period. These probability metrics remain distinct from backtesting,
 paper trading or live returns, and the probabilities remain uncalibrated.
 
+## Gradient boosting
+
+Install the updated project dependencies into the existing Python environment:
+
+```powershell
+Set-Location "$env:USERPROFILE\trade-ai"
+$projectPython = "$env:USERPROFILE\local-ai-trader\.venv\Scripts\python.exe"
+& $projectPython -m pip install -r requirements-dev.txt
+& $projectPython -m pytest -q
+```
+
+For the verified 90-day research period, July 1 through September 29, 2026
+(`start` inclusive, `end` exclusive, UTC), each asset has 25,920 raw candles,
+25,914 labels and 25,902 feature rows. Its purged chronological partitions
+contain 15,535 training, 5,174 validation and 5,181 test rows. Build naive/logistic
+references on these same partitions before comparing XGBoost:
+
+```powershell
+& $projectPython -m local_ai_trader boosting data/processed/splits/coinbase_BTC-USD_300s_1782864000_1790640000_h6_features
+```
+
+The `boosting` command fits **only XGBoost** and prints its validation metrics
+using the same definitions as the earlier naive/logistic runs. Compare models
+on the exact same split manifest, feature allowlist and target definition. A
+different dataset or different baseline parameters requires a new comparison.
+Use validation to compare candidates; freeze choices before evaluating test
+data. Reserve the 90-day test partitions while developing these candidates.
+
+The starting parameters under `[boosting]` are 200 trees, depth 3, learning rate
+0.05, minimum child weight 5 and L2 regularization 5. These limit the capacity
+of the starting model; they were not selected using test results. The seed is
+shared with `[baseline]`. CPU histogram training uses four threads, all training
+rows and all eight features, without fitting a scaler. All three training
+classes must be present; insufficient history produces a clear error.
+
+Training uses no validation `eval_set`, early stopping, calibration fit or
+automatic parameter search. The command reads/hashes only the split manifest,
+training and validation files; it never opens or hashes test Parquet. Changing
+validation inputs cannot change the fitted weights. Input changes during
+fitting prevent publication.
+
+A new `data/models/boosting_<symbol>_<run-id>/` contains:
+
+- `xgboost.json`: native model weights and input names, without pickle.
+- `checkpoint.json`: model hash, feature/class order, preprocessing convention
+  and frozen training metadata.
+- `experiment.json` and `metrics.json`: settings, actual model parameters,
+  provenance, package versions, timings and separate train/validation results.
+- `validation_xgboost.parquet`: probabilities, truth and prediction times.
+
+Softmax probabilities are converted to float64 and normalized to correct
+float32 rounding. This is recorded in the checkpoint and **is not probability
+calibration**. Restored native-model predictions must match the fitted model
+before the complete run is published. A failed write leaves no partial run.
+
+Once model choices are frozen, the existing `evaluate <saved-run-directory>`
+command also supports XGBoost. It verifies the native model hash and input/class
+order, uses the saved horizon and metric settings, and performs no fitting. Test
+results are saved once under `test_evaluation/`, including the model artifact
+hash. It preserves the original run files. Do not evaluate the reserved test
+partition during candidate development.
+
+## First PyTorch MLP
+
+The `mlp` command trains a small feedforward classifier on the same eight
+features and purged partitions used by the classical baselines:
+
+```powershell
+& $projectPython -m local_ai_trader mlp data/processed/splits/coinbase_BTC-USD_300s_1782864000_1790640000_h6_features
+```
+
+Use the existing environment whose PyTorch 2.11.0+cu128 build was verified on the
+RTX 3060. PyTorch remains optional for data/classical-model commands; it is not
+reinstalled by `requirements-dev.txt`. For a new GPU environment, the separate
+`requirements-gpu.txt` specifies the verified CUDA build. The generic `neural`
+extra declares compatible PyTorch versions without selecting a CUDA build.
+
+The initial network has hidden widths 64 and 32, ReLU activations, dropout 0.1,
+and three output logits (2,755 trainable parameters). Settings under `[mlp]`
+specify 30 epochs, batch size 256, AdamW learning rate 0.001, weight decay 0.001
+and gradient clipping at norm 1. These are fixed starting settings, not selected
+using test data. No validation early stopping or best-validation checkpoint
+selection occurs: the saved model is the final fixed-epoch model.
+
+`StandardScaler` fits only on training inputs, including its treatment of
+constant/nearly constant features. The checkpoint stores the resulting mean,
+scale and variance in input order; inference never fits a scaler. Training
+batches follow chronological order. All three training classes must be present.
+Initialization and dropout are seeded; deterministic PyTorch algorithms are
+enabled with the required CUDA workspace setting. Exact reproduction across
+different devices, library versions or CUDA builds is not promised.
+
+GPU training is explicit (`device = "cuda"`): unavailable CUDA stops the run
+instead of silently training on CPU. Mixed precision uses CUDA float16 autocast
+and gradient scaling. Scaling-overflow steps are skipped and counted in the
+training history; nonfinite loss or model weights stop publication. An explicit
+`device = "cpu"` supports CPU verification, with mixed precision disabled.
+
+Each epoch logs training loss. The saved experiment records epoch history,
+training device, actual mixed-precision use, GPU name/peak allocated tensor
+memory where available, seed, package versions and dataset hashes. Validation
+metrics use full-precision inference and float64 softmax; scores are still
+**uncalibrated**. This small model verifies the neural/GPU pipeline; a GPU or a
+neural network does not establish a performance advantage.
+
+A new `data/models/mlp_<symbol>_<run-id>/` contains `mlp_state.pt` (tensor state
+dictionary), `checkpoint.json`, `experiment.json`, `metrics.json` and
+`validation_mlp.parquet`. The model state is restored using
+`torch.load(..., weights_only=True)` with strict layer matching, and restored
+predictions must match the fitted model before staged publication. Training
+never opens or hashes test Parquet. Changing validation data cannot change
+normalization or weights; changed inputs or failed writes leave no partial run.
+
+After choices are frozen, `evaluate <saved-run-directory>` supports the MLP
+without fitting or reading current settings. Frozen evaluation defaults to CPU
+for portability and records the state-file hash. The inference helper also
+accepts an explicit CUDA device. Original experiment files remain unchanged.
+Keep the 90-day test partitions reserved during model and calibration development.
+
+The test suite includes CPU checks and a small CUDA/mixed-precision training and
+checkpoint test. The CUDA test is skipped on machines without an available GPU.
+
 ## Next milestones
 
-1. Review the frozen baseline results, collect a longer research dataset and
-   define new evaluation periods before expanding to walk-forward runs.
-2. Compare gradient boosting and a small GPU MLP; measure calibration separately.
+1. Compare naive, logistic, XGBoost and MLP validation results on the predefined
+   90-day research partitions while reserving test data.
+2. Measure and implement calibration with separate calibration/evaluation periods.
 3. Add cost-aware backtesting, walk-forward evaluation and local experiment logs.
 4. Add a Transformer only when evidence warrants it, then uncertainty, configurable
    policy, a separate risk gate, paper trading, API and dashboard.

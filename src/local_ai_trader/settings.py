@@ -1,10 +1,34 @@
 """Load and validate configuration; resolve data paths against the project root."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import math
 import re
 import tomllib
+
+
+@dataclass(frozen=True)
+class BoostingSettings:
+    n_estimators: int = 200
+    max_depth: int = 3
+    learning_rate: float = 0.05
+    min_child_weight: float = 5.0
+    reg_lambda: float = 5.0
+    n_jobs: int = 4
+
+
+@dataclass(frozen=True)
+class MLPSettings:
+    hidden_sizes: tuple[int, ...] = (64, 32)
+    dropout: float = 0.1
+    epochs: int = 30
+    batch_size: int = 256
+    learning_rate: float = 0.001
+    weight_decay: float = 0.001
+    grad_clip_norm: float = 1.0
+    device: str = "cuda"
+    mixed_precision: bool = True
+    cpu_threads: int = 4
 
 
 @dataclass(frozen=True)
@@ -29,6 +53,42 @@ class Settings:
     raw_dir: Path
     processed_dir: Path
     models_dir: Path
+    boosting: BoostingSettings = field(default_factory=BoostingSettings)
+    mlp: MLPSettings = field(default_factory=MLPSettings)
+
+
+def load_mlp_settings(config: dict) -> MLPSettings:
+    defaults = MLPSettings()
+    values = {name: config.get(name, getattr(defaults, name)) for name in defaults.__dataclass_fields__}
+    hidden = values["hidden_sizes"]
+    if not isinstance(hidden, (tuple, list)) or not hidden:
+        raise ValueError("mlp.hidden_sizes must be a nonempty list of positive integers")
+    values["hidden_sizes"] = tuple(positive_integer(size, "mlp.hidden_sizes") for size in hidden)
+    for name in ("epochs", "batch_size", "cpu_threads"):
+        positive_integer(values[name], f"mlp.{name}")
+    for name in ("dropout", "learning_rate", "weight_decay", "grad_clip_norm"):
+        value = values[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"mlp.{name} must be a nonnegative finite number")
+    if values["dropout"] >= 1 or values["learning_rate"] <= 0 or values["grad_clip_norm"] <= 0:
+        raise ValueError("mlp.dropout must be below 1; learning_rate and grad_clip_norm must be positive")
+    if values["device"] not in ("cpu", "cuda") or type(values["mixed_precision"]) is not bool:
+        raise ValueError("mlp.device must be cpu/cuda and mixed_precision must be boolean")
+    return MLPSettings(**values)
+
+
+def load_boosting_settings(config: dict) -> BoostingSettings:
+    defaults = BoostingSettings()
+    values = {name: config.get(name, getattr(defaults, name)) for name in defaults.__dataclass_fields__}
+    for name in ("n_estimators", "max_depth", "n_jobs"):
+        positive_integer(values[name], f"boosting.{name}")
+    for name in ("learning_rate", "min_child_weight", "reg_lambda"):
+        value = values[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"boosting.{name} must be a nonnegative finite number")
+    if not 0 < values["learning_rate"] <= 1:
+        raise ValueError("boosting.learning_rate must be in (0, 1]")
+    return BoostingSettings(**values)
 
 
 def validate_symbol(symbol: str) -> str:
@@ -114,4 +174,6 @@ def load_settings(path: Path) -> Settings:
         raw_dir=root / paths["raw"],
         processed_dir=root / paths["processed"],
         models_dir=root / paths["models"],
+        boosting=load_boosting_settings(config.get("boosting", {})),
+        mlp=load_mlp_settings(config.get("mlp", {})),
     )
