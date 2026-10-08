@@ -175,5 +175,3 @@ def test_test_data_change_during_evaluation_is_rejected(experiment, monkeypatch)
     monkeypatch.setattr(heldout, "predict_checkpoint", changed)
     with pytest.raises(ValueError, match="Test dataset changed"):
         evaluate_heldout(run)
-
-
