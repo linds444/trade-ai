@@ -585,13 +585,89 @@ and calibrated modes share the same immutable `test_evaluation/` destination,
 preventing a second test evaluation. Missing calibration is rejected before
 test data is loaded. Do not run this on reserved test data during development.
 
+## Validation backtesting
+
+The first simulator is a **research tool on later validation assessment data**.
+It restores the saved model and temperature without fitting and identifies the
+same assessment period recorded by calibration. It loads only validation
+Parquet, audits original input/model hashes, and never opens or hashes test
+Parquet or reads classification test metrics. It can run after a classification
+test evaluation, but that test has then been consumed: policy development needs
+a fresh chronological period for independent strategy evaluation.
+
+```powershell
+& $projectPython -m local_ai_trader backtest data/models/mlp_BTC-USD_20261008T181958Z_c65a0348 --model mlp --variant temperature
+```
+
+`--model` also accepts `naive`, `logistic` and `xgboost` when present in the saved
+experiment. `--variant raw` permits a separate validation comparison. Calibration
+is required for either variant to establish the assessment period. `--config`
+selects current `[backtest]` assumptions; candle interval and horizon come from
+the saved model. `--splits` permits relocation only with matching original hashes.
+There is deliberately no test-partition option or threshold optimizer.
+
+The initial policy is single-asset, spot, long-only, with one position and one
+pending order at most. BUY requires `p_up >= entry_probability` and
+`p_up - p_down >= minimum_direction_margin`. SELL closes an existing position
+when the analogous down thresholds pass. Otherwise an open position is HOLD;
+an unmet entry threshold is AVOID. These configurable demonstration rules are
+not optimized. Class probabilities do not supply expected return, so the policy
+does not claim that a signal covers trading costs or interpret max probability
+as a separate confidence estimate.
+
+Predictions become available at candle close. With `latency_bars = 1`, the
+simulator waits one whole following candle and fills at the next open: a 00:05
+signal fills at 00:10, never at the price used to generate that signal. BUY and
+SELL signals have the same delay. Entry sizes spend `allocation_fraction` of
+cash, including fees. There is no leverage, shorting, overlapping position or
+rebalancing. A position exits after the saved horizon's number of bars **since
+execution**, or an earlier delayed SELL. This holding window starts later than
+the model's label window, which starts at prediction time. Remaining positions
+are liquidated at the last open, a boundary fixed in advance; both sides pay costs.
+The final candle's close and probabilities do not affect simulation results.
+
+Default assumptions are $10,000 cash, 10% entry allocation, a 10% maximum
+entry exposure, 10% drawdown entry limit, 0.55 directional probability and 0.15
+directional margin. The separate risk module checks available cash, exposure
+**after entry costs**, and drawdown at execution time. Exits remain permitted.
+It blocks new entries at the drawdown limit; this is not a guaranteed loss cap.
+Positions are marked at opens, so intrabar drawdown is unobserved and an existing
+position's exposure can grow after entry as prices move. Full portfolio/daily-loss
+limits and live paper-trading gates remain later work.
+
+Costs are configurable: **60 bps (0.6%) fees each side**, 10 bps total spread,
+and 5 bps adverse slippage each side. These are illustrative assumptions, not
+your actual Coinbase account fee tier. BUY price is open plus half spread and
+slippage; SELL price is open minus them. Fees apply to actual fill notional.
+High turnover can therefore overwhelm small predictive advantages. No order-book
+capacity, partial fills, minimum order sizes, taxes or cash interest are modeled.
+
+Each immutable `<saved-run>/backtests/validation_<model>_<variant>_<hash>/`
+contains `backtest.json` with assumptions, provenance and metrics, plus equity,
+fill, trade and decision Parquets for policy, cash and buy-and-hold. Changed
+settings create a different validation research bundle; an identical repeat
+cannot overwrite results. Failed writes or changed inputs leave no partial bundle.
+Buy-and-hold uses the same allocation, costs and first possible entry time,
+holds until the final open, and does not use model signals. Each asset has its
+own simulated account; these are not combined portfolio results.
+
+Metrics include net return, fees, price-impact cost, gross price PnL attribution,
+maximum drawdown, Sharpe, Sortino, win rate, profit factor, trade count, turnover,
+exposure and blocked entries. Completed-trade net PnL must reconcile with final
+cash. Turnover is both-side executed notional divided by initial capital. Annualized
+ratios use open-to-open equity returns and 365-day crypto years with zero risk-free
+return; a short validation window does not establish stable annual performance.
+Undefined ratios, no-trade win rate and profit factor with no losses are null.
+Gross PnL is cost attribution for actual quantities, not a cost-free simulation.
+
 ## Next milestones
 
 1. Compare naive, logistic, XGBoost and MLP validation results on the predefined
    90-day research partitions while reserving test data.
 2. Review temperature calibration on purged later-validation assessment periods,
    then freeze model/calibration choices before the reserved test evaluation.
-3. Add cost-aware backtesting, walk-forward evaluation and local experiment logs.
+3. Verify validation backtesting accounting and execution assumptions, then add
+   walk-forward evaluation and an independent strategy evaluation period.
 4. Add a Transformer only when evidence warrants it, then uncertainty, configurable
    policy, a separate risk gate, paper trading, API and dashboard.
 

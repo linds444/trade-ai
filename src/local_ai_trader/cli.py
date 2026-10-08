@@ -116,6 +116,12 @@ def main(argv: list[str] | None = None) -> int:
     evaluate.add_argument("path", type=Path, help="Saved baseline experiment directory")
     evaluate.add_argument("--splits", type=Path, help="Override split location while verifying original input hashes")
     evaluate.add_argument("--calibrated", action="store_true", help="Report raw and saved-temperature predictions without fitting")
+    backtest = commands.add_parser("backtest", help="Simulate a frozen model on later validation only, with costs")
+    backtest.add_argument("path", type=Path, help="Saved experiment with a calibration bundle")
+    backtest.add_argument("--model", required=True, choices=("naive", "logistic", "xgboost", "mlp"))
+    backtest.add_argument("--variant", choices=("raw", "temperature"), default="temperature")
+    backtest.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    backtest.add_argument("--splits", type=Path, help="Override split location while verifying original input hashes")
     arguments = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
@@ -141,6 +147,10 @@ def main(argv: list[str] | None = None) -> int:
                     raise ValueError("PyTorch is required for mlp; use the verified CUDA environment") from error
                 raise
             train_mlp_experiment(arguments.path, load_settings(arguments.config))
+        elif arguments.command == "backtest":
+            from local_ai_trader.backtest.run import create_backtest
+
+            create_backtest(arguments.path, arguments.model, arguments.variant, load_settings(arguments.config).backtest, arguments.splits)
         elif arguments.command == "calibrate":
             from local_ai_trader.calibration.run import create_calibration
 
