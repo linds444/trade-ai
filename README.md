@@ -386,11 +386,73 @@ new predefined research split. Do not repeatedly adjust the model against this
 same test period. These probability metrics remain distinct from backtesting,
 paper trading or live returns, and the probabilities remain uncalibrated.
 
+## Gradient boosting
+
+Install the updated project dependencies into the existing Python environment:
+
+```powershell
+Set-Location "$env:USERPROFILE\trade-ai"
+$projectPython = "$env:USERPROFILE\local-ai-trader\.venv\Scripts\python.exe"
+& $projectPython -m pip install -r requirements-dev.txt
+& $projectPython -m pytest -q
+```
+
+For the verified 90-day research period, July 1 through September 29, 2026
+(`start` inclusive, `end` exclusive, UTC), each asset has 25,920 raw candles,
+25,914 labels and 25,902 feature rows. Its purged chronological partitions
+contain 15,535 training, 5,174 validation and 5,181 test rows. Build naive/logistic
+references on these same partitions before comparing XGBoost:
+
+```powershell
+& $projectPython -m local_ai_trader boosting data/processed/splits/coinbase_BTC-USD_300s_1782864000_1790640000_h6_features
+```
+
+The `boosting` command fits **only XGBoost** and prints its validation metrics
+using the same definitions as the earlier naive/logistic runs. Compare models
+on the exact same split manifest, feature allowlist and target definition. A
+different dataset or different baseline parameters requires a new comparison.
+Use validation to compare candidates; freeze choices before evaluating test
+data. Reserve the 90-day test partitions while developing these candidates.
+
+The starting parameters under `[boosting]` are 200 trees, depth 3, learning rate
+0.05, minimum child weight 5 and L2 regularization 5. These limit the capacity
+of the starting model; they were not selected using test results. The seed is
+shared with `[baseline]`. CPU histogram training uses four threads, all training
+rows and all eight features, without fitting a scaler. All three training
+classes must be present; insufficient history produces a clear error.
+
+Training uses no validation `eval_set`, early stopping, calibration fit or
+automatic parameter search. The command reads/hashes only the split manifest,
+training and validation files; it never opens or hashes test Parquet. Changing
+validation inputs cannot change the fitted weights. Input changes during
+fitting prevent publication.
+
+A new `data/models/boosting_<symbol>_<run-id>/` contains:
+
+- `xgboost.json`: native model weights and input names, without pickle.
+- `checkpoint.json`: model hash, feature/class order, preprocessing convention
+  and frozen training metadata.
+- `experiment.json` and `metrics.json`: settings, actual model parameters,
+  provenance, package versions, timings and separate train/validation results.
+- `validation_xgboost.parquet`: probabilities, truth and prediction times.
+
+Softmax probabilities are converted to float64 and normalized to correct
+float32 rounding. This is recorded in the checkpoint and **is not probability
+calibration**. Restored native-model predictions must match the fitted model
+before the complete run is published. A failed write leaves no partial run.
+
+Once model choices are frozen, the existing `evaluate <saved-run-directory>`
+command also supports XGBoost. It verifies the native model hash and input/class
+order, uses the saved horizon and metric settings, and performs no fitting. Test
+results are saved once under `test_evaluation/`, including the model artifact
+hash. It preserves the original run files. Do not evaluate the reserved test
+partition during candidate development.
+
 ## Next milestones
 
-1. Review the frozen baseline results, collect a longer research dataset and
-   define new evaluation periods before expanding to walk-forward runs.
-2. Compare gradient boosting and a small GPU MLP; measure calibration separately.
+1. Compare naive, logistic and XGBoost validation results on the predefined
+   90-day research partitions while reserving test data.
+2. Add a small GPU MLP; measure calibration separately.
 3. Add cost-aware backtesting, walk-forward evaluation and local experiment logs.
 4. Add a Transformer only when evidence warrants it, then uncertainty, configurable
    policy, a separate risk gate, paper trading, API and dashboard.
