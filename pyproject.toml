@@ -12,6 +12,7 @@ dependencies = [
     "pandas>=2.2,<3",
     "pyarrow>=19,<24",
     "duckdb>=1.2,<2",
+    "scikit-learn>=1.6,<2",
 ]
 
 [project.optional-dependencies]

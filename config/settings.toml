@@ -17,6 +17,13 @@ train_fraction = 0.6
 validation_fraction = 0.2
 # Remaining 0.2 is held out for testing; overlapping labels are purged.
 
+[baseline]
+random_seed = 42
+logistic_c = 1.0
+logistic_max_iter = 1000
+naive_smoothing = 1.0
+calibration_bins = 10
+
 [download]
 lookback_days = 7
 timeout_seconds = 30
@@ -26,3 +33,4 @@ request_pause_seconds = 0.35
 [paths]
 raw = "data/raw"
 processed = "data/processed"
+models = "data/models"
