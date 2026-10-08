@@ -1,10 +1,20 @@
 """Load and validate configuration; resolve data paths against the project root."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import math
 import re
 import tomllib
+
+
+@dataclass(frozen=True)
+class BoostingSettings:
+    n_estimators: int = 200
+    max_depth: int = 3
+    learning_rate: float = 0.05
+    min_child_weight: float = 5.0
+    reg_lambda: float = 5.0
+    n_jobs: int = 4
 
 
 @dataclass(frozen=True)
@@ -29,6 +39,21 @@ class Settings:
     raw_dir: Path
     processed_dir: Path
     models_dir: Path
+    boosting: BoostingSettings = field(default_factory=BoostingSettings)
+
+
+def load_boosting_settings(config: dict) -> BoostingSettings:
+    defaults = BoostingSettings()
+    values = {name: config.get(name, getattr(defaults, name)) for name in defaults.__dataclass_fields__}
+    for name in ("n_estimators", "max_depth", "n_jobs"):
+        positive_integer(values[name], f"boosting.{name}")
+    for name in ("learning_rate", "min_child_weight", "reg_lambda"):
+        value = values[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"boosting.{name} must be a nonnegative finite number")
+    if not 0 < values["learning_rate"] <= 1:
+        raise ValueError("boosting.learning_rate must be in (0, 1]")
+    return BoostingSettings(**values)
 
 
 def validate_symbol(symbol: str) -> str:
@@ -114,4 +139,5 @@ def load_settings(path: Path) -> Settings:
         raw_dir=root / paths["raw"],
         processed_dir=root / paths["processed"],
         models_dir=root / paths["models"],
+        boosting=load_boosting_settings(config.get("boosting", {})),
     )
