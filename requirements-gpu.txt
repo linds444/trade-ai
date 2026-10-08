@@ -1,0 +1,4 @@
+# The CUDA-enabled build verified on the user's Windows RTX 3060.
+# Install separately; the data pipeline does not require PyTorch.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.11.0+cu128

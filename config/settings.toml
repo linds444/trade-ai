@@ -1,0 +1,28 @@
+[market]
+exchange = "coinbase"
+symbols = ["BTC-USD", "ETH-USD"]
+candle_minutes = 5
+prediction_horizon_minutes = 30
+
+[targets]
+# Provisional label boundary: +/-0.1% is flat. This is not a trading threshold.
+flat_return_threshold = 0.001
+
+[features]
+momentum_steps = 6
+rolling_window = 12
+
+[split]
+train_fraction = 0.6
+validation_fraction = 0.2
+# Remaining 0.2 is held out for testing; overlapping labels are purged.
+
+[download]
+lookback_days = 7
+timeout_seconds = 30
+max_attempts = 3
+request_pause_seconds = 0.35
+
+[paths]
+raw = "data/raw"
+processed = "data/processed"
