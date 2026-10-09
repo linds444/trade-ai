@@ -57,6 +57,14 @@ class BacktestSettings:
 
 
 @dataclass(frozen=True)
+class WalkForwardSettings:
+    train_days: int = 60
+    validation_days: int = 14
+    evaluation_days: int = 14
+    step_days: int = 14
+
+
+@dataclass(frozen=True)
 class Settings:
     symbols: tuple[str, ...]
     candle_seconds: int
@@ -82,6 +90,15 @@ class Settings:
     mlp: MLPSettings = field(default_factory=MLPSettings)
     calibration: CalibrationSettings = field(default_factory=CalibrationSettings)
     backtest: BacktestSettings = field(default_factory=BacktestSettings)
+    walkforward: WalkForwardSettings = field(default_factory=WalkForwardSettings)
+
+
+def load_walkforward_settings(config: dict) -> WalkForwardSettings:
+    defaults = WalkForwardSettings()
+    values = {name: positive_integer(config.get(name, getattr(defaults, name)), f"walkforward.{name}") for name in defaults.__dataclass_fields__}
+    if values["step_days"] < values["evaluation_days"]:
+        raise ValueError("walkforward.step_days must be at least evaluation_days to avoid overlapping evaluation periods")
+    return WalkForwardSettings(**values)
 
 
 def load_backtest_settings(config: dict) -> BacktestSettings:
@@ -246,4 +263,5 @@ def load_settings(path: Path) -> Settings:
         mlp=load_mlp_settings(config.get("mlp", {})),
         calibration=load_calibration_settings(config.get("calibration", {})),
         backtest=load_backtest_settings(config.get("backtest", {})),
+        walkforward=load_walkforward_settings(config.get("walkforward", {})),
     )

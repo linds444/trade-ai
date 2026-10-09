@@ -71,6 +71,13 @@ slippage_bps = 5.0
 # Wait one complete candle after the signal, then fill at the following open.
 latency_bars = 1
 
+[walkforward]
+# Rolling calendar windows; evaluation windows never overlap.
+train_days = 60
+validation_days = 14
+evaluation_days = 14
+step_days = 14
+
 [download]
 lookback_days = 7
 timeout_seconds = 30

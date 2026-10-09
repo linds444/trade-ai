@@ -684,14 +684,63 @@ return; a short validation window does not establish stable annual performance.
 Undefined ratios, no-trade win rate and profit factor with no losses are null.
 Gross PnL is cost attribution for actual quantities, not a cost-free simulation.
 
+## Walk-forward planning
+
+Freeze chronological fold datasets before fitting or reviewing fold performance:
+
+```powershell
+& $projectPython -m local_ai_trader walkforward-plan data/processed/features/coinbase_BTC-USD_300s_1778284800_1790640000_h6_features.parquet --model mlp
+& $projectPython -m local_ai_trader walkforward-plan data/processed/features/coinbase_ETH-USD_300s_1778284800_1790640000_h6_features.parquet --model xgboost
+```
+
+`[walkforward]` defaults to rolling **60-day training, 14-day validation and
+14-day evaluation** windows, advancing by 14 days. Windows use `available_at`
+prediction times and start at the first complete UTC midnight after feature
+warmup. Only full windows are included. Evaluation windows cannot overlap;
+earlier evaluation history can legitimately enter later training once its
+outcomes are known. Each fold will require fresh weights and train-only scaling.
+
+For the verified May 9–September 29 feature datasets, the anchor is May 10 UTC
+and four folds are planned:
+
+| Fold | Training start | Validation start | Evaluation start | Evaluation end (exclusive) |
+| --- | --- | --- | --- | --- |
+| 1 | May 10 | July 9 | July 23 | August 6 |
+| 2 | May 24 | July 23 | August 6 | August 20 |
+| 3 | June 7 | August 6 | August 20 | September 3 |
+| 4 | June 21 | August 20 | September 3 | September 17 |
+
+Labels whose outcomes become known at or after a partition's end are excluded
+in **all three partitions**, including equality. This removes six rows from
+each boundary and prevents the last fold's labels crossing its evaluation end.
+Each fold therefore contains **17,274 training, 4,026 validation and 4,026
+evaluation rows**. Earlier validation will fit temperature; later validation
+will assess it using the existing additional purge. Adjacent 30-minute targets
+inside each partition still overlap and are not independent observations.
+
+An immutable `data/processed/walkforward/<feature-stem>/` contains `plan.json`
+and `fold_01` through `fold_04`, each with training/validation/test Parquets and
+a compatible `split.json`. The plan records source hashes, hashes of every fold
+file, unused leading/tail rows and fixed model/calibration/backtest settings.
+The selected family is recorded along with naive/logistic controls and a raw
+probability comparator. Source changes or failed writes prevent publication.
+
+Calendar fractions are 60/88 and 14/88; the future training runner must restore
+these and the other frozen settings from the protocol. This command only
+prepares folds: it does not fit models or report fold performance. Do not change
+model or policy settings in response to individual evaluation-fold results.
+These dates overlap previously examined research periods, so walk-forward
+results are historical stability evidence. A fresh later period remains
+necessary for an independent final strategy evaluation.
+
 ## Next milestones
 
 1. Compare naive, logistic, XGBoost and MLP validation results on the predefined
    90-day research partitions while reserving test data.
 2. Review temperature calibration on purged later-validation assessment periods,
    then freeze model/calibration choices before the reserved test evaluation.
-3. Verify validation backtesting accounting and execution assumptions, then add
-   walk-forward evaluation and an independent strategy evaluation period.
+3. Verify the immutable walk-forward protocol, then add fold model execution
+   and evaluate stability with fixed policy and cost assumptions.
 4. Add a Transformer only when evidence warrants it, then uncertainty, configurable
    policy, a separate risk gate, paper trading, API and dashboard.
 

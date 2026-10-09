@@ -93,6 +93,10 @@ def main(argv: list[str] | None = None) -> int:
     reprocess.add_argument("--start", required=True, help="Inclusive, timezone-aware and interval-aligned")
     reprocess.add_argument("--end", required=True, help="Exclusive, timezone-aware and interval-aligned")
     reprocess.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    walkforward = commands.add_parser("walkforward-plan", help="Freeze rolling calendar folds before model fitting")
+    walkforward.add_argument("path", type=Path, help="Feature Parquet with metadata")
+    walkforward.add_argument("--model", required=True, choices=("mlp", "xgboost"), help="Selected family; naive/logistic controls are recorded too")
+    walkforward.add_argument("--config", type=Path, default=Path("config/settings.toml"))
     inspect = commands.add_parser("inspect", help="Query a Parquet dataset using DuckDB")
     inspect.add_argument("path", type=Path)
     targets = commands.add_parser("targets", help="Build causal-time-labelled forward-return targets")
@@ -138,6 +142,10 @@ def main(argv: list[str] | None = None) -> int:
             settings = load_settings(arguments.config)
             first, last = range_bounds(arguments.start, arguments.end, settings.candle_seconds, settings.lookback_days)
             reprocess_download(arguments.path, first, last, settings)
+        elif arguments.command == "walkforward-plan":
+            from local_ai_trader.walkforward.plan import create_walkforward_plan
+
+            create_walkforward_plan(arguments.path, load_settings(arguments.config), arguments.model)
         elif arguments.command == "targets":
             create_target_dataset(arguments.path, load_settings(arguments.config))
         elif arguments.command == "features":
