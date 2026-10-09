@@ -88,6 +88,11 @@ def main(argv: list[str] | None = None) -> int:
     download.add_argument("--start", help="Inclusive, timezone-aware and interval-aligned")
     download.add_argument("--end", help="Exclusive, timezone-aware and interval-aligned")
     download.add_argument("--symbols", nargs="+", help="Override configured Coinbase products")
+    reprocess = commands.add_parser("reprocess", help="Build a complete subrange from saved raw responses without downloading")
+    reprocess.add_argument("path", type=Path, help="Original raw download JSON")
+    reprocess.add_argument("--start", required=True, help="Inclusive, timezone-aware and interval-aligned")
+    reprocess.add_argument("--end", required=True, help="Exclusive, timezone-aware and interval-aligned")
+    reprocess.add_argument("--config", type=Path, default=Path("config/settings.toml"))
     inspect = commands.add_parser("inspect", help="Query a Parquet dataset using DuckDB")
     inspect.add_argument("path", type=Path)
     targets = commands.add_parser("targets", help="Build causal-time-labelled forward-return targets")
@@ -127,6 +132,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if arguments.command == "download":
             collect(arguments.config, arguments.start, arguments.end, arguments.symbols)
+        elif arguments.command == "reprocess":
+            from local_ai_trader.data.reprocess import reprocess_download
+
+            settings = load_settings(arguments.config)
+            first, last = range_bounds(arguments.start, arguments.end, settings.candle_seconds, settings.lookback_days)
+            reprocess_download(arguments.path, first, last, settings)
         elif arguments.command == "targets":
             create_target_dataset(arguments.path, load_settings(arguments.config))
         elif arguments.command == "features":

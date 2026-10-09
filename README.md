@@ -95,6 +95,30 @@ If Coinbase denies access, fails, or reports gaps, stop and inspect the error;
 the program does not silently substitute another exchange. Coinbase may omit
 intervals with no trades. A gap is evidence to investigate, not a candle to invent.
 
+## Reuse a complete portion of a saved raw download
+
+If repeated requests leave unresolved gaps in an earlier part of a download,
+an explicitly selected complete subrange can be processed without downloading
+everything again. For the April–September archive with gaps on May 8, select
+May 9 through September 29 (exclusive), **143 days / 41,184 candles**:
+
+```powershell
+& $projectPython -m local_ai_trader reprocess data/raw/coinbase_BTC-USD_300s_1775001600_1790640000.json --start "2026-05-09T00:00:00Z" --end "2026-09-29T00:00:00Z"
+```
+
+The command makes no API requests and applies the same OHLC, deduplication and
+strict gap checks as collection. Bounds must be aligned and contained in the
+original archive; its candle interval must match configuration. It preserves
+the original raw responses and quality report, then writes a separate Parquet
+snapshot and quality report recording the raw path, SHA-256, original bounds
+and processing time. Existing snapshots cannot be overwritten. If the selected
+range still has gaps, only a new gap report is saved. Failed writes or changes
+to the source during processing prevent candle publication.
+
+Choose the research range based on data availability before evaluating model
+results, and record the excluded period. The command does not fill missing
+candles, join disjoint periods, or change previously trained models.
+
 ## Data guarantees and limits
 
 - Raw page responses, request bounds, exchange, product and retrieval time are saved.
