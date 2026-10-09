@@ -32,6 +32,39 @@ class MLPSettings:
 
 
 @dataclass(frozen=True)
+class CalibrationSettings:
+    fit_fraction: float = 0.5
+    min_temperature: float = 0.25
+    max_temperature: float = 4.0
+    probability_floor: float = 1e-12
+    optimizer_tolerance: float = 1e-6
+    max_iterations: int = 200
+
+
+@dataclass(frozen=True)
+class BacktestSettings:
+    initial_cash: float = 10000.0
+    allocation_fraction: float = 0.1
+    max_exposure_fraction: float = 0.1
+    max_drawdown_fraction: float = 0.1
+    entry_probability: float = 0.55
+    exit_probability: float = 0.55
+    minimum_direction_margin: float = 0.15
+    fee_bps: float = 60.0
+    spread_bps: float = 10.0
+    slippage_bps: float = 5.0
+    latency_bars: int = 1
+
+
+@dataclass(frozen=True)
+class WalkForwardSettings:
+    train_days: int = 60
+    validation_days: int = 14
+    evaluation_days: int = 14
+    step_days: int = 14
+
+
+@dataclass(frozen=True)
 class Settings:
     symbols: tuple[str, ...]
     candle_seconds: int
@@ -55,6 +88,58 @@ class Settings:
     models_dir: Path
     boosting: BoostingSettings = field(default_factory=BoostingSettings)
     mlp: MLPSettings = field(default_factory=MLPSettings)
+    calibration: CalibrationSettings = field(default_factory=CalibrationSettings)
+    backtest: BacktestSettings = field(default_factory=BacktestSettings)
+    walkforward: WalkForwardSettings = field(default_factory=WalkForwardSettings)
+
+
+def load_walkforward_settings(config: dict) -> WalkForwardSettings:
+    defaults = WalkForwardSettings()
+    values = {name: positive_integer(config.get(name, getattr(defaults, name)), f"walkforward.{name}") for name in defaults.__dataclass_fields__}
+    if values["step_days"] < values["evaluation_days"]:
+        raise ValueError("walkforward.step_days must be at least evaluation_days to avoid overlapping evaluation periods")
+    return WalkForwardSettings(**values)
+
+
+def load_backtest_settings(config: dict) -> BacktestSettings:
+    defaults = BacktestSettings()
+    values = {name: config.get(name, getattr(defaults, name)) for name in defaults.__dataclass_fields__}
+    positive_integer(values["latency_bars"], "backtest.latency_bars")
+    for name, value in values.items():
+        if name == "latency_bars":
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"backtest.{name} must be a finite number")
+    if values["initial_cash"] <= 0:
+        raise ValueError("backtest.initial_cash must be positive")
+    for name in ("allocation_fraction", "max_exposure_fraction", "max_drawdown_fraction", "entry_probability", "exit_probability"):
+        if not 0 < values[name] <= 1:
+            raise ValueError(f"backtest.{name} must be in (0, 1]")
+    if not 0 <= values["minimum_direction_margin"] <= 1:
+        raise ValueError("backtest.minimum_direction_margin must be in [0, 1]")
+    for name in ("fee_bps", "spread_bps", "slippage_bps"):
+        if not 0 <= values[name] < 10000:
+            raise ValueError(f"backtest.{name} must be in [0, 10000)")
+    if values["spread_bps"] / 2 + values["slippage_bps"] >= 10000:
+        raise ValueError("Combined adverse price impact must be below 100%")
+    return BacktestSettings(**values)
+
+
+def load_calibration_settings(config: dict) -> CalibrationSettings:
+    defaults = CalibrationSettings()
+    values = {name: config.get(name, getattr(defaults, name)) for name in defaults.__dataclass_fields__}
+    for name in ("fit_fraction", "min_temperature", "max_temperature", "probability_floor", "optimizer_tolerance"):
+        value = values[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"calibration.{name} must be a positive finite number")
+    if values["fit_fraction"] >= 1:
+        raise ValueError("calibration.fit_fraction must be below 1")
+    if not values["min_temperature"] <= 1 <= values["max_temperature"] or values["min_temperature"] >= values["max_temperature"]:
+        raise ValueError("Temperature bounds must be ordered and contain 1")
+    if values["probability_floor"] > 1e-6:
+        raise ValueError("calibration.probability_floor must be at most 1e-6")
+    positive_integer(values["max_iterations"], "calibration.max_iterations")
+    return CalibrationSettings(**values)
 
 
 def load_mlp_settings(config: dict) -> MLPSettings:
@@ -176,4 +261,7 @@ def load_settings(path: Path) -> Settings:
         models_dir=root / paths["models"],
         boosting=load_boosting_settings(config.get("boosting", {})),
         mlp=load_mlp_settings(config.get("mlp", {})),
+        calibration=load_calibration_settings(config.get("calibration", {})),
+        backtest=load_backtest_settings(config.get("backtest", {})),
+        walkforward=load_walkforward_settings(config.get("walkforward", {})),
     )

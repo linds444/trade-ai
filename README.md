@@ -95,6 +95,30 @@ If Coinbase denies access, fails, or reports gaps, stop and inspect the error;
 the program does not silently substitute another exchange. Coinbase may omit
 intervals with no trades. A gap is evidence to investigate, not a candle to invent.
 
+## Reuse a complete portion of a saved raw download
+
+If repeated requests leave unresolved gaps in an earlier part of a download,
+an explicitly selected complete subrange can be processed without downloading
+everything again. For the April–September archive with gaps on May 8, select
+May 9 through September 29 (exclusive), **143 days / 41,184 candles**:
+
+```powershell
+& $projectPython -m local_ai_trader reprocess data/raw/coinbase_BTC-USD_300s_1775001600_1790640000.json --start "2026-05-09T00:00:00Z" --end "2026-09-29T00:00:00Z"
+```
+
+The command makes no API requests and applies the same OHLC, deduplication and
+strict gap checks as collection. Bounds must be aligned and contained in the
+original archive; its candle interval must match configuration. It preserves
+the original raw responses and quality report, then writes a separate Parquet
+snapshot and quality report recording the raw path, SHA-256, original bounds
+and processing time. Existing snapshots cannot be overwritten. If the selected
+range still has gaps, only a new gap report is saved. Failed writes or changes
+to the source during processing prevent candle publication.
+
+Choose the research range based on data availability before evaluating model
+results, and record the excluded period. The command does not fill missing
+candles, join disjoint periods, or change previously trained models.
+
 ## Data guarantees and limits
 
 - Raw page responses, request bounds, exchange, product and retrieval time are saved.
@@ -508,12 +532,215 @@ Keep the 90-day test partitions reserved during model and calibration developmen
 The test suite includes CPU checks and a small CUDA/mixed-precision training and
 checkpoint test. The CUDA test is skipped on machines without an available GPU.
 
+## Temperature calibration
+
+Temperature scaling adjusts probability sharpness with one positive scalar per
+model: `softmax(log(max(p, probability_floor)) / temperature)`. Temperature 1 is
+the identity, temperatures above 1 soften predictions, and temperatures below
+1 sharpen them. The tiny probability floor handles zero scores. Positive
+temperature preserves each row's predicted class, so accuracy and F1 do not
+change; compare log loss, Brier score and reliability data. A fitted temperature
+does not guarantee improvement on a later period or perfect calibration.
+
+Fit a separate calibration bundle for an existing saved run:
+
+```powershell
+& $projectPython -m local_ai_trader calibrate data/models/boosting_BTC-USD_20261008T175708Z_5e9dc4f5
+```
+
+This example uses the verified 90-day BTC XGBoost checkpoint. The command
+supports naive/logistic, XGBoost and MLP runs. It restores model weights and
+preprocessing without fitting them and loads only **validation Parquet**.
+Hashes audit the original manifest/training/validation files. The test Parquet
+is never opened or hashed. Saved models are restored on CPU, so calibration
+does not need another GPU training run.
+
+With `[calibration].fit_fraction = 0.5`, the first half of validation is the
+calibration-fit period and the second half is the assessment period. Fit rows
+whose outcomes reach the first assessment prediction are purged. For each
+90-day asset this leaves **2,581 fit rows**, six labels purged, and **2,587
+assessment rows**. Fit labels are strictly known before assessment begins;
+the original validation-to-test purge is also checked.
+
+SciPy bounded scalar minimization fits temperature using only fit-period log
+loss. Fixed bounds 0.25–4 include temperature 1; identity and both endpoints
+are checked explicitly. Failed optimization stops publication. Assessment
+labels and scores cannot influence temperature fitting, and the command does
+not automatically undo calibration based on assessment results.
+
+The printed table compares raw and adjusted scores on **the same later
+validation rows**. Earlier full-validation tables used 5,174 rows and are not
+directly comparable to this smaller assessment. The later segment already
+contributed to earlier model comparisons, so it is a diagnostic calibration
+assessment, not a fresh independent test. Keep the original 90-day test
+partitions reserved while choosing models and calibration settings.
+
+An immutable `<saved-run>/calibration/` contains:
+
+- `calibration.json`: scalar temperatures, optimizer results, configuration,
+  source/model hashes, purged temporal regions and class counts.
+- `metrics.json`: separate fit-period and assessment metrics for raw and
+  temperature-adjusted predictions.
+- `assessment_<model>_<variant>.parquet`: assessment probabilities and truth.
+
+Metrics retain the existing top-label ECE convention and now also include
+`classwise_calibration_bins`, `classwise_ece` and `classwise_ece_macro`. Each
+class's bin records mean predicted probability, observed event frequency and
+count. These are reliability-curve data: for example, the `up` bins compare
+`p_up` with how often `up` actually occurred. Empty bins have null means; counts
+are not independent sample counts because adjacent horizon labels overlap.
+
+Publication is staged, failed writes leave no partial bundle, and changed
+inputs or model artifacts prevent publication. The original checkpoint,
+weights and experiment metrics are preserved. Repeated calibration or
+calibration after an existing test evaluation is refused. A `--splits` override
+supports relocated datasets only when the original hashes still match.
+
+After all choices are frozen, this optional evaluation mode reports raw and
+saved-temperature predictions together, without fitting any parameter:
+
+```powershell
+& $projectPython -m local_ai_trader evaluate <saved-run-directory> --calibrated
+```
+
+It verifies calibration/model/input hashes and purged fit-label availability,
+ignores current settings, and records the calibration checkpoint hash. Raw
+and calibrated modes share the same immutable `test_evaluation/` destination,
+preventing a second test evaluation. Missing calibration is rejected before
+test data is loaded. Do not run this on reserved test data during development.
+
+## Validation backtesting
+
+The first simulator is a **research tool on later validation assessment data**.
+It restores the saved model and temperature without fitting and identifies the
+same assessment period recorded by calibration. It loads only validation
+Parquet, audits original input/model hashes, and never opens or hashes test
+Parquet or reads classification test metrics. It can run after a classification
+test evaluation, but that test has then been consumed: policy development needs
+a fresh chronological period for independent strategy evaluation.
+
+```powershell
+& $projectPython -m local_ai_trader backtest data/models/mlp_BTC-USD_20261008T181958Z_c65a0348 --model mlp --variant temperature
+```
+
+`--model` also accepts `naive`, `logistic` and `xgboost` when present in the saved
+experiment. `--variant raw` permits a separate validation comparison. Calibration
+is required for either variant to establish the assessment period. `--config`
+selects current `[backtest]` assumptions; candle interval and horizon come from
+the saved model. `--splits` permits relocation only with matching original hashes.
+There is deliberately no test-partition option or threshold optimizer.
+
+The initial policy is single-asset, spot, long-only, with one position and one
+pending order at most. BUY requires `p_up >= entry_probability` and
+`p_up - p_down >= minimum_direction_margin`. SELL closes an existing position
+when the analogous down thresholds pass. Otherwise an open position is HOLD;
+an unmet entry threshold is AVOID. These configurable demonstration rules are
+not optimized. Class probabilities do not supply expected return, so the policy
+does not claim that a signal covers trading costs or interpret max probability
+as a separate confidence estimate.
+
+Predictions become available at candle close. With `latency_bars = 1`, the
+simulator waits one whole following candle and fills at the next open: a 00:05
+signal fills at 00:10, never at the price used to generate that signal. BUY and
+SELL signals have the same delay. Entry sizes spend `allocation_fraction` of
+cash, including fees. There is no leverage, shorting, overlapping position or
+rebalancing. A position exits after the saved horizon's number of bars **since
+execution**, or an earlier delayed SELL. This holding window starts later than
+the model's label window, which starts at prediction time. Remaining positions
+are liquidated at the last open, a boundary fixed in advance; both sides pay costs.
+The final candle's close and probabilities do not affect simulation results.
+
+Default assumptions are $10,000 cash, 10% entry allocation, a 10% maximum
+entry exposure, 10% drawdown entry limit, 0.55 directional probability and 0.15
+directional margin. The separate risk module checks available cash, exposure
+**after entry costs**, and drawdown at execution time. Exits remain permitted.
+It blocks new entries at the drawdown limit; this is not a guaranteed loss cap.
+Positions are marked at opens, so intrabar drawdown is unobserved and an existing
+position's exposure can grow after entry as prices move. Full portfolio/daily-loss
+limits and live paper-trading gates remain later work.
+
+Costs are configurable: **60 bps (0.6%) fees each side**, 10 bps total spread,
+and 5 bps adverse slippage each side. These are illustrative assumptions, not
+your actual Coinbase account fee tier. BUY price is open plus half spread and
+slippage; SELL price is open minus them. Fees apply to actual fill notional.
+High turnover can therefore overwhelm small predictive advantages. No order-book
+capacity, partial fills, minimum order sizes, taxes or cash interest are modeled.
+
+Each immutable `<saved-run>/backtests/validation_<model>_<variant>_<hash>/`
+contains `backtest.json` with assumptions, provenance and metrics, plus equity,
+fill, trade and decision Parquets for policy, cash and buy-and-hold. Changed
+settings create a different validation research bundle; an identical repeat
+cannot overwrite results. Failed writes or changed inputs leave no partial bundle.
+Buy-and-hold uses the same allocation, costs and first possible entry time,
+holds until the final open, and does not use model signals. Each asset has its
+own simulated account; these are not combined portfolio results.
+
+Metrics include net return, fees, price-impact cost, gross price PnL attribution,
+maximum drawdown, Sharpe, Sortino, win rate, profit factor, trade count, turnover,
+exposure and blocked entries. Completed-trade net PnL must reconcile with final
+cash. Turnover is both-side executed notional divided by initial capital. Annualized
+ratios use open-to-open equity returns and 365-day crypto years with zero risk-free
+return; a short validation window does not establish stable annual performance.
+Undefined ratios, no-trade win rate and profit factor with no losses are null.
+Gross PnL is cost attribution for actual quantities, not a cost-free simulation.
+
+## Walk-forward planning
+
+Freeze chronological fold datasets before fitting or reviewing fold performance:
+
+```powershell
+& $projectPython -m local_ai_trader walkforward-plan data/processed/features/coinbase_BTC-USD_300s_1778284800_1790640000_h6_features.parquet --model mlp
+& $projectPython -m local_ai_trader walkforward-plan data/processed/features/coinbase_ETH-USD_300s_1778284800_1790640000_h6_features.parquet --model xgboost
+```
+
+`[walkforward]` defaults to rolling **60-day training, 14-day validation and
+14-day evaluation** windows, advancing by 14 days. Windows use `available_at`
+prediction times and start at the first complete UTC midnight after feature
+warmup. Only full windows are included. Evaluation windows cannot overlap;
+earlier evaluation history can legitimately enter later training once its
+outcomes are known. Each fold will require fresh weights and train-only scaling.
+
+For the verified May 9–September 29 feature datasets, the anchor is May 10 UTC
+and four folds are planned:
+
+| Fold | Training start | Validation start | Evaluation start | Evaluation end (exclusive) |
+| --- | --- | --- | --- | --- |
+| 1 | May 10 | July 9 | July 23 | August 6 |
+| 2 | May 24 | July 23 | August 6 | August 20 |
+| 3 | June 7 | August 6 | August 20 | September 3 |
+| 4 | June 21 | August 20 | September 3 | September 17 |
+
+Labels whose outcomes become known at or after a partition's end are excluded
+in **all three partitions**, including equality. This removes six rows from
+each boundary and prevents the last fold's labels crossing its evaluation end.
+Each fold therefore contains **17,274 training, 4,026 validation and 4,026
+evaluation rows**. Earlier validation will fit temperature; later validation
+will assess it using the existing additional purge. Adjacent 30-minute targets
+inside each partition still overlap and are not independent observations.
+
+An immutable `data/processed/walkforward/<feature-stem>/` contains `plan.json`
+and `fold_01` through `fold_04`, each with training/validation/test Parquets and
+a compatible `split.json`. The plan records source hashes, hashes of every fold
+file, unused leading/tail rows and fixed model/calibration/backtest settings.
+The selected family is recorded along with naive/logistic controls and a raw
+probability comparator. Source changes or failed writes prevent publication.
+
+Calendar fractions are 60/88 and 14/88; the future training runner must restore
+these and the other frozen settings from the protocol. This command only
+prepares folds: it does not fit models or report fold performance. Do not change
+model or policy settings in response to individual evaluation-fold results.
+These dates overlap previously examined research periods, so walk-forward
+results are historical stability evidence. A fresh later period remains
+necessary for an independent final strategy evaluation.
+
 ## Next milestones
 
 1. Compare naive, logistic, XGBoost and MLP validation results on the predefined
    90-day research partitions while reserving test data.
-2. Measure and implement calibration with separate calibration/evaluation periods.
-3. Add cost-aware backtesting, walk-forward evaluation and local experiment logs.
+2. Review temperature calibration on purged later-validation assessment periods,
+   then freeze model/calibration choices before the reserved test evaluation.
+3. Verify the immutable walk-forward protocol, then add fold model execution
+   and evaluate stability with fixed policy and cost assumptions.
 4. Add a Transformer only when evidence warrants it, then uncertainty, configurable
    policy, a separate risk gate, paper trading, API and dashboard.
 

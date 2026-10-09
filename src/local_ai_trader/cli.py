@@ -88,6 +88,15 @@ def main(argv: list[str] | None = None) -> int:
     download.add_argument("--start", help="Inclusive, timezone-aware and interval-aligned")
     download.add_argument("--end", help="Exclusive, timezone-aware and interval-aligned")
     download.add_argument("--symbols", nargs="+", help="Override configured Coinbase products")
+    reprocess = commands.add_parser("reprocess", help="Build a complete subrange from saved raw responses without downloading")
+    reprocess.add_argument("path", type=Path, help="Original raw download JSON")
+    reprocess.add_argument("--start", required=True, help="Inclusive, timezone-aware and interval-aligned")
+    reprocess.add_argument("--end", required=True, help="Exclusive, timezone-aware and interval-aligned")
+    reprocess.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    walkforward = commands.add_parser("walkforward-plan", help="Freeze rolling calendar folds before model fitting")
+    walkforward.add_argument("path", type=Path, help="Feature Parquet with metadata")
+    walkforward.add_argument("--model", required=True, choices=("mlp", "xgboost"), help="Selected family; naive/logistic controls are recorded too")
+    walkforward.add_argument("--config", type=Path, default=Path("config/settings.toml"))
     inspect = commands.add_parser("inspect", help="Query a Parquet dataset using DuckDB")
     inspect.add_argument("path", type=Path)
     targets = commands.add_parser("targets", help="Build causal-time-labelled forward-return targets")
@@ -108,14 +117,35 @@ def main(argv: list[str] | None = None) -> int:
     mlp = commands.add_parser("mlp", help="Train a small PyTorch MLP; evaluate validation only")
     mlp.add_argument("path", type=Path, help="Directory containing purged splits and split.json")
     mlp.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    calibrate = commands.add_parser("calibrate", help="Fit temperature on earlier validation; assess later validation")
+    calibrate.add_argument("path", type=Path, help="Saved model experiment directory")
+    calibrate.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    calibrate.add_argument("--splits", type=Path, help="Override split location while verifying original input hashes")
     evaluate = commands.add_parser("evaluate", help="Evaluate a frozen baseline run on its held-out test data")
     evaluate.add_argument("path", type=Path, help="Saved baseline experiment directory")
     evaluate.add_argument("--splits", type=Path, help="Override split location while verifying original input hashes")
+    evaluate.add_argument("--calibrated", action="store_true", help="Report raw and saved-temperature predictions without fitting")
+    backtest = commands.add_parser("backtest", help="Simulate a frozen model on later validation only, with costs")
+    backtest.add_argument("path", type=Path, help="Saved experiment with a calibration bundle")
+    backtest.add_argument("--model", required=True, choices=("naive", "logistic", "xgboost", "mlp"))
+    backtest.add_argument("--variant", choices=("raw", "temperature"), default="temperature")
+    backtest.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    backtest.add_argument("--splits", type=Path, help="Override split location while verifying original input hashes")
     arguments = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
         if arguments.command == "download":
             collect(arguments.config, arguments.start, arguments.end, arguments.symbols)
+        elif arguments.command == "reprocess":
+            from local_ai_trader.data.reprocess import reprocess_download
+
+            settings = load_settings(arguments.config)
+            first, last = range_bounds(arguments.start, arguments.end, settings.candle_seconds, settings.lookback_days)
+            reprocess_download(arguments.path, first, last, settings)
+        elif arguments.command == "walkforward-plan":
+            from local_ai_trader.walkforward.plan import create_walkforward_plan
+
+            create_walkforward_plan(arguments.path, load_settings(arguments.config), arguments.model)
         elif arguments.command == "targets":
             create_target_dataset(arguments.path, load_settings(arguments.config))
         elif arguments.command == "features":
@@ -136,8 +166,16 @@ def main(argv: list[str] | None = None) -> int:
                     raise ValueError("PyTorch is required for mlp; use the verified CUDA environment") from error
                 raise
             train_mlp_experiment(arguments.path, load_settings(arguments.config))
+        elif arguments.command == "backtest":
+            from local_ai_trader.backtest.run import create_backtest
+
+            create_backtest(arguments.path, arguments.model, arguments.variant, load_settings(arguments.config).backtest, arguments.splits)
+        elif arguments.command == "calibrate":
+            from local_ai_trader.calibration.run import create_calibration
+
+            create_calibration(arguments.path, load_settings(arguments.config).calibration, arguments.splits)
         elif arguments.command == "evaluate":
-            evaluate_heldout(arguments.path, arguments.splits)
+            evaluate_heldout(arguments.path, arguments.splits, calibrated=arguments.calibrated)
         else:
             if not arguments.path.is_file():
                 raise ValueError(f"Parquet file not found: {arguments.path}")
