@@ -97,6 +97,9 @@ def main(argv: list[str] | None = None) -> int:
     walkforward.add_argument("path", type=Path, help="Feature Parquet with metadata")
     walkforward.add_argument("--model", required=True, choices=("mlp", "xgboost"), help="Selected family; naive/logistic controls are recorded too")
     walkforward.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    walkforward_run = commands.add_parser("walkforward-run", help="Execute frozen folds with fresh models, calibration and cost-aware evaluation")
+    walkforward_run.add_argument("path", type=Path, help="Directory containing immutable plan.json")
+    walkforward_run.add_argument("--resume", action="store_true", help="Verify and reuse completed bundles after interruption")
     inspect = commands.add_parser("inspect", help="Query a Parquet dataset using DuckDB")
     inspect.add_argument("path", type=Path)
     targets = commands.add_parser("targets", help="Build causal-time-labelled forward-return targets")
@@ -146,6 +149,10 @@ def main(argv: list[str] | None = None) -> int:
             from local_ai_trader.walkforward.plan import create_walkforward_plan
 
             create_walkforward_plan(arguments.path, load_settings(arguments.config), arguments.model)
+        elif arguments.command == "walkforward-run":
+            from local_ai_trader.walkforward.run import run_walkforward
+
+            run_walkforward(arguments.path, resume=arguments.resume)
         elif arguments.command == "targets":
             create_target_dataset(arguments.path, load_settings(arguments.config))
         elif arguments.command == "features":

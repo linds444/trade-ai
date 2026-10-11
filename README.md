@@ -725,7 +725,7 @@ file, unused leading/tail rows and fixed model/calibration/backtest settings.
 The selected family is recorded along with naive/logistic controls and a raw
 probability comparator. Source changes or failed writes prevent publication.
 
-Calendar fractions are 60/88 and 14/88; the future training runner must restore
+Calendar fractions are 60/88 and 14/88; the execution runner restores
 these and the other frozen settings from the protocol. This command only
 prepares folds: it does not fit models or report fold performance. Do not change
 model or policy settings in response to individual evaluation-fold results.
@@ -733,14 +733,54 @@ These dates overlap previously examined research periods, so walk-forward
 results are historical stability evidence. A fresh later period remains
 necessary for an independent final strategy evaluation.
 
+## Walk-forward execution
+
+Run a saved plan with its frozen settings:
+
+```powershell
+& $projectPython -m local_ai_trader walkforward-run data/processed/walkforward/coinbase_BTC-USD_300s_1778284800_1790640000_h6_features
+& $projectPython -m local_ai_trader walkforward-run data/processed/walkforward/coinbase_ETH-USD_300s_1778284800_1790640000_h6_features
+```
+
+There is no current-config or parameter override. Each fold fits fresh selected
+MLP/XGBoost weights and fresh naive/logistic controls using training data only.
+It then fits scalar temperatures on earlier validation, purges overlapping
+outcomes, and assesses later validation. **Every fold's models and temperatures
+are saved before any evaluation Parquet is read or hashed.** Evaluation outcomes
+can enter later folds' training history, but never tune the frozen research
+recipe. Raw and temperature-scaled probabilities are always retained together;
+assessment results do not change the chosen variant or thresholds.
+
+The plan's `execution/` directory contains each fold's model checkpoints,
+calibration, paired evaluation predictions and eight cost-aware simulations:
+raw/scaled naive, logistic and the selected family, plus cash and buy-and-hold.
+Simulations use the frozen delayed fills, fees, spread, slippage and risk gates.
+Policies receive candle prices and saved probabilities without future labels.
+Positions liquidate at the predefined last selected open; the final purged
+label rows are excluded from the simulated price timeline too.
+
+Each fold starts with the same cash and resets positions and risk history.
+`execution/summary/summary.json` reports pooled prediction scores, per-fold
+performance, mean/best/worst fold returns, worst fold drawdown and totals for
+trades and costs. This is a summary of separate reset accounts, not a continuous
+portfolio or a compounded return. Evaluation windows do not overlap, but
+30-minute labels within them do; confidence intervals are not computed.
+
+If interrupted, rerun the same command with `--resume`. Saved checkpoints,
+calibration and evaluation bundles are verified and reused, including bundles
+whose atomic publication completed just before a journal-write failure.
+Completed evaluations are not recomputed. Changed input or artifact hashes
+stop execution. A `running.lock` prevents concurrent runs; after a hard process
+crash, verify that the recorded process has stopped before removing a stale
+lock and resuming. Failed writes retain previously completed research results.
+
 ## Next milestones
 
 1. Compare naive, logistic, XGBoost and MLP validation results on the predefined
    90-day research partitions while reserving test data.
 2. Review temperature calibration on purged later-validation assessment periods,
    then freeze model/calibration choices before the reserved test evaluation.
-3. Verify the immutable walk-forward protocol, then add fold model execution
-   and evaluate stability with fixed policy and cost assumptions.
+3. Evaluate walk-forward stability with the frozen protocol, policy and costs.
 4. Add a Transformer only when evidence warrants it, then uncertainty, configurable
    policy, a separate risk gate, paper trading, API and dashboard.
 

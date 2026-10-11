@@ -201,6 +201,11 @@ def load_settings(path: Path) -> Settings:
     path = path.resolve()
     with path.open("rb") as source:
         config = tomllib.load(source)
+    return settings_from_config(config, path.parent.parent)
+
+
+def settings_from_config(config: dict, root: Path) -> Settings:
+    """Validate parsed configuration against the same rules for all callers."""
     market, download, paths = config["market"], config["download"], config["paths"]
     if market["exchange"] != "coinbase":
         raise ValueError("This milestone supports only the Coinbase public candle API")
@@ -223,7 +228,6 @@ def load_settings(path: Path) -> Settings:
     pause = float(download["request_pause_seconds"])
     if not math.isfinite(pause) or pause < 0:
         raise ValueError("request_pause_seconds must be finite and nonnegative")
-    root = path.parent.parent
     rolling_window = positive_integer(config["features"]["rolling_window"], "rolling_window")
     if rolling_window < 2:
         raise ValueError("rolling_window must be at least 2")
