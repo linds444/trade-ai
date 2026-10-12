@@ -774,6 +774,11 @@ stop execution. A `running.lock` prevents concurrent runs; after a hard process
 crash, verify that the recorded process has stopped before removing a stale
 lock and resuming. Failed writes retain previously completed research results.
 
+The runner supports nested Windows paths longer than 260 characters using
+extended absolute paths. Atomic Parquet writes reuse an open temporary file.
+No registry edits, administrator access or folder relocation are required.
+Automated tests run on Windows and Linux, including a long-path file round trip.
+
 ## Next milestones
 
 1. Compare naive, logistic, XGBoost and MLP validation results on the predefined

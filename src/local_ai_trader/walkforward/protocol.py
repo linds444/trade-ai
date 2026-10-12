@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from local_ai_trader.features.build_features import FEATURE_COLUMNS
+from local_ai_trader.data.storage import native_path
 from local_ai_trader.models.baseline import CLASS_NAMES
 from local_ai_trader.models.train import file_digest
 from local_ai_trader.settings import (
@@ -66,7 +67,7 @@ class Protocol:
 
 
 def load_protocol(directory: Path) -> Protocol:
-    directory = directory.resolve()
+    directory = native_path(directory.resolve())
     path = directory / "plan.json"
     digest = file_digest(path)
     with path.open(encoding="utf-8") as stream:
