@@ -872,6 +872,45 @@ It creates no orders, fits no models, and does not alter recorded backtests.
 The next forecasting milestone must train and validate an execution-aligned
 return model before a real BUY candidate can reach the paper risk gate.
 
+## Execution-aligned return targets
+
+Prepare the return forecaster's supervised targets from the original complete
+candles, using the current timeframe, holding horizon and latency assumptions:
+
+```powershell
+& $projectPython -m local_ai_trader execution-targets data/processed/coinbase_BTC-USD_300s_1778284800_1790640000.parquet
+& $projectPython -m local_ai_trader execution-targets data/processed/coinbase_ETH-USD_300s_1778284800_1790640000.parquet
+```
+
+For a prediction at `available_at[t]`, entry occurs at
+`timestamp[t + 1 + latency_bars]` and horizon exit occurs at
+`timestamp[t + 1 + latency_bars + holding_bars]`. The regression target is the
+fractional change between those **reference open prices**. A separate diagnostic
+net label applies the same multiplicative fees/spread/slippage conversion as the
+cost-aware policy. Its unit is entry cash outlay, independent of position size.
+It represents a fixed-horizon outcome, not a replay of earlier SELL/risk exits.
+
+With five-minute candles, one latency bar and six holding bars, a signal at
+00:05 enters at 00:10 and exits at 00:40. This pipeline uses completed OHLCV
+candles, so it conservatively marks the target as known at the exit candle's
+completion, **00:45**. The label is available eight bars (40 minutes) after
+prediction. Future splits must purge against `execution_target_available_at`;
+the classifier's six-bar purge is insufficient for these targets.
+
+Eight trailing source rows lack an exit candle and are removed. Each verified
+143-day, 41,184-row source therefore yields **41,176 execution labels** before
+feature warmup or split purging. Original causal candle columns are preserved.
+Future entry/exit times, reference prices and both return labels are explicitly
+marked as future-only metadata/targets, never model inputs. OHLCV, market,
+availability and contiguous-timeline checks reject incomplete or malformed data.
+
+An immutable `data/processed/execution_targets/<source-stem>_h6_l1/` contains
+`labels.parquet` and `targets.json`. Metadata records source and label hashes,
+timing offsets, formulas, conservative availability, costs and future-only
+columns. Atomic publication prevents partial bundles and rejects source changes.
+This command does not fit a model or evaluate a new strategy. Causal features
+and training for the return forecaster are the next preparation steps.
+
 ## Next milestones
 
 1. Compare naive, logistic, XGBoost and MLP validation results on the predefined

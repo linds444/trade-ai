@@ -110,6 +110,9 @@ def main(argv: list[str] | None = None) -> int:
     targets = commands.add_parser("targets", help="Build causal-time-labelled forward-return targets")
     targets.add_argument("path", type=Path, help="Original candle Parquet file")
     targets.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    execution_targets = commands.add_parser("execution-targets", help="Build delayed-entry open-to-open labels for a return forecaster")
+    execution_targets.add_argument("path", type=Path, help="Original complete candle Parquet")
+    execution_targets.add_argument("--config", type=Path, default=Path("config/settings.toml"))
     features = commands.add_parser("features", help="Build trailing features from a labelled dataset")
     features.add_argument("path", type=Path, help="Labelled target Parquet file")
     features.add_argument("--config", type=Path, default=Path("config/settings.toml"))
@@ -168,6 +171,10 @@ def main(argv: list[str] | None = None) -> int:
             create_decision_preview(arguments.path, arguments.config)
         elif arguments.command == "targets":
             create_target_dataset(arguments.path, load_settings(arguments.config))
+        elif arguments.command == "execution-targets":
+            from local_ai_trader.forecast.targets import create_execution_target_dataset
+
+            create_execution_target_dataset(arguments.path, load_settings(arguments.config))
         elif arguments.command == "features":
             create_feature_dataset(arguments.path, load_settings(arguments.config))
         elif arguments.command == "split":

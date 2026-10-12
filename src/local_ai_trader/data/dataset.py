@@ -32,7 +32,7 @@ def build_targets(
         raise ValueError("flat_return_threshold must be a numeric fraction")
     if not np.isfinite(flat_return_threshold) or not 0 <= flat_return_threshold < 1:
         raise ValueError("Invalid flat_return_threshold")
-    if any(column.startswith("target_") for column in candles.columns):
+    if any(column.startswith(("target_", "execution_")) for column in candles.columns):
         raise ValueError("Input already contains target columns; use the original candle dataset")
     if len(candles) <= horizon_steps:
         raise ValueError("Not enough candles for the requested horizon")
