@@ -15,6 +15,8 @@ from local_ai_trader.walkforward.plan import create_walkforward_plan
 from local_ai_trader.walkforward.protocol import load_protocol, restore_settings
 from local_ai_trader.walkforward import run as runner
 from local_ai_trader.walkforward import results
+from local_ai_trader.uncertainty import report as reporter
+from local_ai_trader.uncertainty.scores import model_disagreement
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -320,3 +322,149 @@ def test_completed_artifact_mutation_rejects_resume(make_plan, monkeypatch, arti
         monkeypatch.setattr(runner, function, forbidden)
     with pytest.raises(ValueError, match="changed"):
         runner.run_walkforward(directory, resume=True)
+
+
+@pytest.mark.parametrize("family", ["xgboost", "mlp"])
+def test_uncertainty_reporting_uses_saved_distributions_and_preserves_all_completed_outputs(make_plan, monkeypatch, family):
+    directory, config = make_plan(family)
+    execution, _ = runner.run_walkforward(directory)
+    before = runner.file_manifest(execution)
+    config.write_text("Current config is not read", encoding="utf-8")
+    for function in ("fit_family", "create_calibration", "evaluate_heldout"):
+        monkeypatch.setattr(runner, function, forbidden)
+    monkeypatch.setattr("local_ai_trader.models.inference.predict_frozen_models", forbidden)
+    output, report = reporter.create_uncertainty_report(directory)
+    after = runner.file_manifest(execution)
+    assert {name: digest for name, digest in after.items() if not name.startswith("uncertainty/")} == before
+    assert report["models_or_calibration_refitted"] is False
+    assert report["model_inference_repeated"] is False
+    assert report["policy_or_risk_changed"] is False
+    assert report["thresholds_selected"] is False
+    assert report["evaluation_previously_consumed"] is True
+    assert report["evaluation_rows"] == 564
+    assert len(report["metrics"]) == 6
+    for name in report["metrics"]:
+        source = pd.read_parquet(execution / f"summary/{name}_predictions.parquet")
+        enriched = pd.read_parquet(output / f"{name}_uncertainty.parquet")
+        pd.testing.assert_frame_equal(enriched[list(source)], source)
+        assert "confidence" not in enriched
+        assert "expected_return" not in enriched
+        assert report["metrics"][name]["mean_entropy_normalized"] == pytest.approx(enriched.entropy_normalized.mean())
+        if name.startswith(family):
+            variant = name.removeprefix(f"{family}_")
+            reference = pd.read_parquet(execution / f"summary/logistic_{variant}_predictions.parquet")
+            expected = model_disagreement(source[reporter.PROBABILITY_COLUMNS].to_numpy(), reference[reporter.PROBABILITY_COLUMNS].to_numpy())
+            np.testing.assert_allclose(enriched.logistic_disagreement_normalized, expected)
+            assert report["selected_vs_logistic"][variant]["members"] == [name, f"logistic_{variant}"]
+    frozen_report = runner.file_manifest(output)
+    with pytest.raises(ValueError, match="already exists"):
+        reporter.create_uncertainty_report(directory)
+    assert runner.file_manifest(output) == frozen_report
+    _, resumed = runner.run_walkforward(directory, resume=True)
+    assert resumed["folds"] == 2
+    assert runner.file_manifest(output) == frozen_report
+
+
+def test_uncertainty_requires_completed_execution(make_plan):
+    directory, _ = make_plan()
+    with pytest.raises(ValueError, match="Complete walk-forward"):
+        reporter.create_uncertainty_report(directory)
+    assert not (directory / "execution").exists()
+
+
+@pytest.mark.parametrize("artifact", ["prediction", "calibration", "weights"])
+def test_uncertainty_rejects_changed_upstream_artifacts(make_plan, monkeypatch, artifact):
+    directory, _ = make_plan()
+    execution, _ = runner.run_walkforward(directory)
+    path = {
+        "prediction": execution / "summary/xgboost_raw_predictions.parquet",
+        "calibration": next(execution.rglob("calibration/calibration.json")),
+        "weights": next(execution.rglob("xgboost.json")),
+    }[artifact]
+    with path.open("ab") as stream:
+        stream.write(b" ")
+    monkeypatch.setattr(runner, "fit_family", forbidden)
+    with pytest.raises(ValueError, match="changed"):
+        reporter.create_uncertainty_report(directory)
+    assert not (execution / "uncertainty").exists()
+
+
+@pytest.mark.parametrize("writer", ["write_json", "write_parquet"])
+def test_uncertainty_failed_publication_preserves_inputs_and_removes_staging(make_plan, monkeypatch, writer):
+    directory, _ = make_plan()
+    execution, _ = runner.run_walkforward(directory)
+    before = runner.file_manifest(execution)
+
+    def fail(*args, **kwargs):
+        raise OSError("Simulated disk failure")
+
+    monkeypatch.setattr(reporter, writer, fail)
+    with pytest.raises(OSError, match="disk failure"):
+        reporter.create_uncertainty_report(directory)
+    assert runner.file_manifest(execution) == before
+    assert not list(execution.glob(".uncertainty-staging-*"))
+
+
+def test_uncertainty_detects_journal_mutation_during_publication(make_plan, monkeypatch):
+    directory, _ = make_plan()
+    execution, _ = runner.run_walkforward(directory)
+    original_write = reporter.write_parquet
+
+    def write(*args, **kwargs):
+        original_write(*args, **kwargs)
+        with (execution / "state.json").open("ab") as stream:
+            stream.write(b" ")
+
+    monkeypatch.setattr(reporter, "write_parquet", write)
+    with pytest.raises(ValueError, match="journal or binding changed"):
+        reporter.create_uncertainty_report(directory)
+    assert not (execution / "uncertainty").exists()
+    assert not list(execution.glob(".uncertainty-staging-*"))
+
+
+def test_uncertainty_cli_dispatches_without_config_or_training(make_plan, monkeypatch):
+    directory, _ = make_plan()
+    called = []
+    monkeypatch.setattr(reporter, "create_uncertainty_report", lambda path: called.append(path))
+    assert cli.main(["uncertainty", str(directory)]) == 0
+    assert called == [directory]
+
+
+def test_uncertainty_rejects_incomplete_journal_active_execution_and_escaping_paths(make_plan):
+    directory, _ = make_plan()
+    execution, _ = runner.run_walkforward(directory)
+    path = execution / "state.json"
+    original = path.read_bytes()
+    state = runner.read_json(path)
+    state["complete"] = False
+    path.write_text(json.dumps(state), encoding="utf-8")
+    with pytest.raises(ValueError, match="does not establish"):
+        reporter.create_uncertainty_report(directory)
+    path.write_bytes(original)
+    lock = execution / "running.lock"
+    lock.write_text("active", encoding="utf-8")
+    with pytest.raises(ValueError, match="execution is running"):
+        reporter.create_uncertainty_report(directory)
+    lock.unlink()
+    state = runner.read_json(path)
+    state["folds"]["1"]["selected"]["run"] = "../outside"
+    path.write_text(json.dumps(state), encoding="utf-8")
+    with pytest.raises(ValueError, match="escapes"):
+        reporter.create_uncertainty_report(directory)
+    assert not (execution / "uncertainty").exists()
+
+
+def test_uncertainty_requires_aligned_reference_predictions_even_if_manifest_is_updated(make_plan):
+    directory, _ = make_plan()
+    execution, _ = runner.run_walkforward(directory)
+    path = execution / "summary/logistic_raw_predictions.parquet"
+    frame = pd.read_parquet(path)
+    frame.loc[0, "available_at"] += pd.to_timedelta(60, unit="s")
+    frame.to_parquet(path, index=False)
+    state_path = execution / "state.json"
+    state = runner.read_json(state_path)
+    state["summary"][path.name] = runner.file_digest(path)
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    with pytest.raises(ValueError, match="mismatched"):
+        reporter.create_uncertainty_report(directory)
+    assert not (execution / "uncertainty").exists()

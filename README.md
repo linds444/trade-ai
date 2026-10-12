@@ -779,6 +779,45 @@ extended absolute paths. Atomic Parquet writes reuse an open temporary file.
 No registry edits, administrator access or folder relocation are required.
 Automated tests run on Windows and Linux, including a long-path file round trip.
 
+## Uncertainty diagnostics
+
+After a walk-forward run is complete, describe its saved probability distributions:
+
+```powershell
+& $projectPython -m local_ai_trader uncertainty data/processed/walkforward/coinbase_BTC-USD_300s_1778284800_1790640000_h6_features
+& $projectPython -m local_ai_trader uncertainty data/processed/walkforward/coinbase_ETH-USD_300s_1778284800_1790640000_h6_features
+```
+
+This first uncertainty milestone computes normalized Shannon entropy, top-class
+probability and the margin between the largest two probabilities. Entropy is
+zero for a deterministic distribution and one for a uniform three-class
+distribution. It describes ambiguity within the prediction. Low entropy can
+occur in an incorrect prediction; its complement is not calibrated confidence.
+Top-class probability is retained under its explicit name.
+
+The selected MLP/XGBoost distribution is also compared with logistic regression
+at identical prediction times using equal-weight Jensen-Shannon divergence,
+normalized by `log(2)`. Zero means identical distributions; one means disjoint
+supports. Disagreement exposes different model views, but correlated models can
+agree and be wrong. Raw and temperature-scaled variants are compared separately
+against the same variant of logistic; those two variants of one model are not
+treated as independent ensemble members. Naive controls retain entropy scores.
+
+Reports require a complete, plan-bound execution and verify all recorded model,
+calibration, evaluation, backtest and summary hashes. They reuse saved predictions
+without fitting or running model inference. `execution/uncertainty/` contains an
+immutable JSON report and six enriched prediction Parquets. Original results,
+decisions and accounting remain unchanged. Five predefined entropy bands show
+descriptive accuracy on already consumed outcomes; they do not select trading
+thresholds or establish a new unseen evaluation.
+
+Entropy is inexpensive and uses one forward prediction. Model disagreement
+requires comparable model outputs. Monte Carlo dropout requires repeated model
+passes, and independently trained ensembles require additional checkpoints;
+these are later options when evaluation justifies their cost. None of these
+scores estimates expected return after fees. A future cost-aware entry policy
+needs return-size forecasts aligned with its execution and holding horizon.
+
 ## Next milestones
 
 1. Compare naive, logistic, XGBoost and MLP validation results on the predefined
