@@ -12,7 +12,7 @@ import pandas as pd
 
 from local_ai_trader.data.dataset import TARGET_COLUMNS
 from local_ai_trader.data.split import validate_feature_dataset
-from local_ai_trader.data.storage import write_json, write_parquet
+from local_ai_trader.data.storage import native_path, write_json, write_parquet
 from local_ai_trader.features.build_features import FEATURE_COLUMNS
 from local_ai_trader.models.baseline import CLASS_NAMES
 from local_ai_trader.models.train import file_digest
@@ -112,7 +112,7 @@ def create_walkforward_plan(source: Path, settings: Settings, model: str) -> tup
     for name in ("horizon_steps", "flat_return_threshold"):
         if target_metadata.get(name) != getattr(settings, name):
             raise ValueError(f"Target metadata disagrees with {name}")
-    destination = settings.processed_dir / "walkforward" / source.stem
+    destination = native_path(settings.processed_dir / "walkforward" / source.stem)
     if destination.exists():
         raise ValueError("Walk-forward plan already exists; inspect its immutable plan.json")
     frame = pd.read_parquet(source)
