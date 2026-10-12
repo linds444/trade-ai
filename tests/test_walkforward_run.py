@@ -17,6 +17,7 @@ from local_ai_trader.walkforward import run as runner
 from local_ai_trader.walkforward import results
 from local_ai_trader.uncertainty import report as reporter
 from local_ai_trader.uncertainty.scores import model_disagreement
+from local_ai_trader.decision import preview as decision_preview
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -468,3 +469,92 @@ def test_uncertainty_requires_aligned_reference_predictions_even_if_manifest_is_
     with pytest.raises(ValueError, match="mismatched"):
         reporter.create_uncertainty_report(directory)
     assert not (execution / "uncertainty").exists()
+
+
+@pytest.mark.parametrize("family", ["xgboost", "mlp"])
+def test_cost_aware_preview_uses_causal_packet_without_inventing_return_forecasts(make_plan, monkeypatch, family):
+    directory, config = make_plan(family)
+    execution, _ = runner.run_walkforward(directory)
+    before = runner.file_manifest(execution)
+    original_decide = decision_preview.decide_cost_aware
+
+    def decide(prediction, *args, **kwargs):
+        assert set(prediction.__dataclass_fields__) == {"symbol", "prediction_time", "probabilities"}
+        assert kwargs["forecast"] is None
+        return original_decide(prediction, *args, **kwargs)
+
+    monkeypatch.setattr(decision_preview, "decide_cost_aware", decide)
+    for function in ("fit_family", "create_calibration", "evaluate_heldout"):
+        monkeypatch.setattr(runner, function, forbidden)
+    monkeypatch.setattr("local_ai_trader.models.inference.predict_frozen_models", forbidden)
+    output, report = decision_preview.create_decision_preview(directory, config)
+    after = runner.file_manifest(execution)
+    assert {name: digest for name, digest in after.items() if not name.startswith("decision_preview/")} == before
+    assert report["decision"]["action"] == "AVOID"
+    assert report["decision"]["reason"] == "expected_return_unavailable"
+    assert report["decision"]["expected_net_return"] is None
+    assert report["expected_gross_return_forecast"] is None
+    assert report["orders_created"] is False
+    assert report["strategy_performance_evaluated"] is False
+    assert report["model_or_forecast_fitted"] is False
+    assert report["return_forecast_contract"]["latency_bars"] == 1
+    assert report["decision"]["model_disagreement_normalized"] is not None
+    # The new policy table does not extend or mutate the frozen research settings.
+    assert "decision" not in load_protocol(directory).plan["settings"]
+    saved = (output / "preview.json").read_bytes()
+    with pytest.raises(ValueError, match="already exists"):
+        decision_preview.create_decision_preview(directory, config)
+    assert (output / "preview.json").read_bytes() == saved
+
+
+def test_cost_aware_preview_failed_write_leaves_original_results_and_no_partial_preview(make_plan, monkeypatch):
+    directory, config = make_plan()
+    execution, _ = runner.run_walkforward(directory)
+    before = runner.file_manifest(execution)
+
+    def fail(*args, **kwargs):
+        raise OSError("Preview disk failure")
+
+    monkeypatch.setattr(decision_preview, "write_json", fail)
+    with pytest.raises(OSError, match="Preview disk"):
+        decision_preview.create_decision_preview(directory, config)
+    assert runner.file_manifest(execution) == before
+    assert not list(execution.glob(".decision-preview-staging-*"))
+
+
+def test_cost_aware_preview_detects_policy_config_mutation_before_publication(make_plan, monkeypatch):
+    directory, config = make_plan()
+    execution, _ = runner.run_walkforward(directory)
+    original_write = decision_preview.write_json
+
+    def write(*args, **kwargs):
+        original_write(*args, **kwargs)
+        with config.open("a", encoding="utf-8") as stream:
+            stream.write("\n# changed during preview\n")
+
+    monkeypatch.setattr(decision_preview, "write_json", write)
+    with pytest.raises(ValueError, match="config changed"):
+        decision_preview.create_decision_preview(directory, config)
+    assert not (execution / "decision_preview").exists()
+    assert not list(execution.glob(".decision-preview-staging-*"))
+
+
+def test_cost_aware_preview_cli_dispatches_without_forecast_override(make_plan, monkeypatch):
+    directory, config = make_plan()
+    called = []
+    monkeypatch.setattr(decision_preview, "create_decision_preview", lambda path, settings: called.append((path, settings)))
+    assert cli.main(["decision-preview", str(directory), "--config", str(config)]) == 0
+    assert called == [(directory, config)]
+    with pytest.raises(SystemExit):
+        cli.main(["decision-preview", str(directory), "--expected-return", "0.05"])
+
+
+def test_cost_aware_preview_reads_new_policy_but_keeps_costs_bound_to_completed_plan(make_plan):
+    directory, config = make_plan()
+    runner.run_walkforward(directory)
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("fee_bps = 60.0", "fee_bps = 90.0").replace("minimum_expected_net_return = 0.002", "minimum_expected_net_return = 0.003")
+    config.write_text(text, encoding="utf-8")
+    _, report = decision_preview.create_decision_preview(directory, config)
+    assert report["policy"]["minimum_expected_net_return"] == 0.003
+    assert report["costs"]["fee_bps"] == 60.0

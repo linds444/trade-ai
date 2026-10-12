@@ -818,6 +818,60 @@ these are later options when evaluation justifies their cost. None of these
 scores estimates expected return after fees. A future cost-aware entry policy
 needs return-size forecasts aligned with its execution and holding horizon.
 
+## Cost-aware decision candidates
+
+The separate `[decision]` table configures the future paper policy's probability,
+entropy and model-disagreement limits and its required net-return margin. These
+are engineering starting points, not thresholds optimized on historical test
+results. `DecisionSettings` remains separate from frozen research `Settings`,
+so adding this table does not invalidate previously saved walk-forward plans.
+
+The policy requires a structured `ReturnForecast` before proposing a BUY. Its
+symbol, prediction time, candle interval, entry latency and holding duration
+must match the prediction and execution assumptions. Its target is fractional
+reference-price return from **delayed entry open to horizon exit open**. Existing
+close-to-close classification targets have different timing and cannot supply
+this forecast. Current classifiers supply no expected-return estimate, so new
+entries produce `AVOID / expected_return_unavailable`.
+
+With per-side fee fraction `f` and adverse price impact
+`i = (full_spread_bps / 2 + slippage_bps) / 10000`, entry outlay includes the
+buy fee and exit proceeds deduct the sell fee:
+
+```
+factor = (1 - i) * (1 - f) / ((1 + i) * (1 + f))
+expected_net_return = (1 + expected_gross_return) * factor - 1
+required_gross_return = (1 + minimum_expected_net_return) / factor - 1
+```
+
+This return is per unit of entry cash outlay, not the whole account. The frozen
+60-bps-per-side fee, 10-bps full spread and 5-bps slippage imply approximately
+**1.4099% gross break-even**. The initial 0.2% net margin requires gross return
+**strictly above 1.6127%**. This is a model-based mean threshold under fixed
+costs, not a guaranteed realized profit. Earlier policy/risk exits can have a
+different return than the fixed-horizon forecast.
+
+Valid entries also require the configured up-probability and direction margin,
+entropy limit and an aligned reference-model comparison by default. A BUY is
+only a candidate: the independent risk gate must still authorize execution and
+position size. SELL/HOLD logic for open positions does not depend on entry
+return estimates, entropy limits or reference availability. Freshness and account
+state checks belong to the future paper coordinator and risk gate.
+
+Inspect an already completed run's last saved prediction with:
+
+```powershell
+& $projectPython -m local_ai_trader decision-preview data/processed/walkforward/coinbase_BTC-USD_300s_1778284800_1790640000_h6_features
+```
+
+The command writes one immutable `execution/decision_preview/preview.json` with
+probabilities, uncertainty, cost hurdles, current decision settings and source
+hashes. It assumes a flat position and uses the plan's original costs. It is a
+historical diagnostic, not a current market signal or new strategy evaluation.
+It creates no orders, fits no models, and does not alter recorded backtests.
+The next forecasting milestone must train and validate an execution-aligned
+return model before a real BUY candidate can reach the paper risk gate.
+
 ## Next milestones
 
 1. Compare naive, logistic, XGBoost and MLP validation results on the predefined

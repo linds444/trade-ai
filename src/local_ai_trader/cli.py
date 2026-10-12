@@ -102,6 +102,9 @@ def main(argv: list[str] | None = None) -> int:
     walkforward_run.add_argument("--resume", action="store_true", help="Verify and reuse completed bundles after interruption")
     uncertainty = commands.add_parser("uncertainty", help="Audit entropy and model disagreement in saved walk-forward predictions")
     uncertainty.add_argument("path", type=Path, help="Directory containing a completed immutable walk-forward plan")
+    decision_preview = commands.add_parser("decision-preview", help="Explain a cost-aware entry candidate using saved historical probabilities")
+    decision_preview.add_argument("path", type=Path, help="Completed walk-forward plan directory")
+    decision_preview.add_argument("--config", type=Path, default=Path("config/settings.toml"), help="Read the separate decision policy table; costs remain bound to the plan")
     inspect = commands.add_parser("inspect", help="Query a Parquet dataset using DuckDB")
     inspect.add_argument("path", type=Path)
     targets = commands.add_parser("targets", help="Build causal-time-labelled forward-return targets")
@@ -159,6 +162,10 @@ def main(argv: list[str] | None = None) -> int:
             from local_ai_trader.uncertainty.report import create_uncertainty_report
 
             create_uncertainty_report(arguments.path)
+        elif arguments.command == "decision-preview":
+            from local_ai_trader.decision.preview import create_decision_preview
+
+            create_decision_preview(arguments.path, arguments.config)
         elif arguments.command == "targets":
             create_target_dataset(arguments.path, load_settings(arguments.config))
         elif arguments.command == "features":

@@ -78,6 +78,18 @@ validation_days = 14
 evaluation_days = 14
 step_days = 14
 
+[decision]
+# Starting rules for the future cost-aware paper policy, not optimized thresholds.
+# Existing frozen backtests continue using their recorded [backtest] rules.
+entry_probability = 0.55
+exit_probability = 0.55
+minimum_direction_margin = 0.15
+maximum_entropy = 0.90
+maximum_model_disagreement = 0.10
+require_model_comparison = true
+# Fractional net return on entry outlay: 0.002 = 0.2%, after both sides' costs.
+minimum_expected_net_return = 0.002
+
 [download]
 lookback_days = 7
 timeout_seconds = 30
