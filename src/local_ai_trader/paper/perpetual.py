@@ -32,6 +32,25 @@ def _number(value, *, positive=False):
     return float(value)
 
 
+def modeled_entry_net_return(quote, expected, slippage_bps, funding_budget=None):
+    """Shared preview/account convention: net PnL per entry fill notional."""
+    expected = _number(expected)
+    if expected <= -1:
+        raise ValueError("Gross long return forecast must exceed -100%")
+    bid, ask = _number(quote["bid"], positive=True), _number(quote["ask"], positive=True)
+    fee, slip = _number(quote["fee_bps"]) / 10000, _number(slippage_bps) / 10000
+    if bid >= ask or not 0 <= fee < 1 or not 0 <= slip < 1:
+        raise ValueError("Invalid modeled perpetual costs")
+    if funding_budget is not None:
+        funding_budget = _number(funding_budget)
+        if funding_budget < 0:
+            raise ValueError("Funding cost budget must be nonnegative; do not credit hoped-for funding")
+    fill = ask * (1 + slip)
+    exit_estimate = bid * (1 - slip) * (1 + expected)
+    net = (exit_estimate * (1 - fee) - fill * (1 + fee)) / fill
+    return _number(net - (funding_budget if funding_budget is not None else 0))
+
+
 def _time(value):
     return _utc(datetime.fromisoformat(value))
 
@@ -194,14 +213,8 @@ def _reduce(state, contract, event):
         impact = quantity * (fill_price - mid)
         equity, reserved, available = _totals(state)
         projected = equity - fee + quantity * (quote["mark"] - fill_price)
-        exit_estimate = quote["bid"] * (1 - contract["slippage_bps"] / 10000) * (1 + expected)
-        modeled_net = (exit_estimate * (1 - quote["fee_bps"] / 10000) - fill_price * (1 + quote["fee_bps"] / 10000)) / fill_price
         funding_estimate = inputs.get("expected_funding_cost_fraction")
-        if funding_estimate is not None:
-            funding_estimate = _number(funding_estimate)
-            if funding_estimate < 0:
-                raise ValueError("Funding cost budget must be nonnegative; do not credit hoped-for funding")
-            modeled_net -= funding_estimate
+        modeled_net = modeled_entry_net_return(quote, expected, contract["slippage_bps"], funding_estimate)
         for value in (margin, fee, impact, projected, modeled_net):
             _number(value)
         exposure = math.fsum(p["quantity"] * p["mark_price"] for p in state["positions"].values())

@@ -1628,3 +1628,47 @@ validation accuracy do not establish the separately validated 70% reliability
 measure. Otherwise eligible BUY candidates route to REVIEW through the existing
 signal gate. These are research models without demonstrated profitability; no
 orders, paper fills or forward strategy month are created by this command.
+
+## Live model scanner and cost-aware entry previews
+
+Keep the funding collector open. In another PowerShell window, use the model
+directory printed by `hyperliquid-train`:
+
+```powershell
+& $projectPython -m local_ai_trader hyperliquid-decisions --models "data/hyperliquid/models/models_<UTC>_<id>" --config config/hyperliquid.toml --watch
+```
+
+This connects the saved primary models and Ridge return forecasts to fresh
+Hyperliquid data for all eight markets. Watch mode archives one preview per
+five-minute window; it does not retrain or read reserved test data. Source/model
+market rosters, feature parameters, execution-label timing and model hashes must
+agree. The eligible signal is the **previous** completed-window feature row:
+its one-bar delay has elapsed when the current quote arrives. Using the newest
+row would skip the configured execution delay. Unavailable primary models are
+named and never replaced by another family or an invented return forecast.
+
+The flat-position preview uses calibrated **up** probability, not the maximum
+class probability. Entry requires the configured 60% minimum and a Ridge gross
+return covering the current bid/ask spread, both taker fees, one basis point of
+slippage per side, a current-rate funding budget and the 0.2% net margin. The
+funding budget assumes one potential hourly settlement at the current positive
+rate and oracle/entry-price ratio; negative rates supply no hoped-for credit.
+This is an expected-cost assumption, not a settled funding payment or a maximum
+loss bound. The scanner and perpetual account share the same cost function and
+net-PnL denominator (entry fill notional).
+
+Otherwise eligible BUY candidates pass through the existing signal gate and
+remain REVIEW while validated reliability is unavailable. Low probability or
+insufficient cost coverage produces AVOID with its rule. No scanner result
+authorizes account risk or fills. The flat assumption does not represent real
+inventory, available collateral, position limits, daily loss or liquidation
+checks. Execution integration and separately validated reliability remain work
+before the forward strategy trial starts.
+
+Immutable `data/hyperliquid/decisions/preview_<UTC>_<id>/` bundles contain raw
+market responses, exact config bytes, model/checkpoint references, causal inputs,
+per-market forecasts, modeled costs and gate reasons. Quotes and mark/funding
+contexts must remain fresh at publication; a moved candle boundary, stale/future
+data or changed config/model refuses publication. Staging failures leave no
+partial preview. These observations create no account, order, fill or performance
+clock. `Ctrl+C` stops the scanner independently of the funding collector.
