@@ -120,6 +120,9 @@ def main(argv: list[str] | None = None) -> int:
     funding = commands.add_parser("hyperliquid-funding", help="Archive settled rates and observed oracle proxies; no orders")
     funding.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
     funding.add_argument("--watch", action="store_true", help="Capture hourly oracle windows and changed funding history until Ctrl+C")
+    history = commands.add_parser("hyperliquid-history", help="Prepare venue-specific causal research data and purged partitions for all configured markets")
+    history.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
+    history.add_argument("--bars", type=int, default=4999, help="Closed five-minute bars to request (128–4999; default: 4999)")
     perp_demo = commands.add_parser("perpetual-paper-demo", help="Synthetic persisted USDC margin/funding workflow; no strategy or orders")
     perp_demo.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
     perp_status = commands.add_parser("perpetual-paper-status", help="Audit recorded USDC perpetual balances without fetching prices")
@@ -222,6 +225,10 @@ def main(argv: list[str] | None = None) -> int:
             from local_ai_trader.hyperliquid.funding import run_funding_collector
 
             run_funding_collector(arguments.config, watch=arguments.watch)
+        elif arguments.command == "hyperliquid-history":
+            from local_ai_trader.hyperliquid.history import prepare_hyperliquid_history
+
+            prepare_hyperliquid_history(arguments.config, bars=arguments.bars)
         elif arguments.command == "perpetual-paper-demo":
             from local_ai_trader.paper.perpetual_demo import perpetual_demo
 

@@ -191,7 +191,8 @@ def parse_contexts(payload: list, coins: tuple[str, ...], received_at: datetime)
     return found
 
 
-def parse_candles(payload: list, coin: str, start: int, end: int):
+def clean_hyperliquid_candles(payload: list, coin: str, start: int, end: int):
+    """Validate raw candles and report gaps without inventing market activity."""
     if not isinstance(payload, list):
         raise ValueError("Hyperliquid candles must be a list")
     rows = []
@@ -207,9 +208,14 @@ def parse_candles(payload: list, coin: str, start: int, end: int):
             raise ValueError("Candle trade count must be a nonnegative integer")
         rows.append([opened // 1000, *(_float(candle.get(name)) for name in ("l", "h", "o", "c", "v"))])
     frame, quality = clean_candles(rows, start, end, SECONDS)
+    frame["symbol"], frame["exchange"] = f"{coin}-USDC", "hyperliquid"
+    return frame, quality
+
+
+def parse_candles(payload: list, coin: str, start: int, end: int):
+    frame, quality = clean_hyperliquid_candles(payload, coin, start, end)
     if quality.missing_count:
         raise ValueError(f"Hyperliquid {coin}: {quality.missing_count} missing completed candles")
-    frame["symbol"], frame["exchange"] = f"{coin}-USDC", "hyperliquid"
     return frame, quality
 
 

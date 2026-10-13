@@ -9,8 +9,9 @@ The current deployment target is **eight Hyperliquid perpetuals, 1× leverage,
 long only**. Its public mainnet data feed validates and archives live observations
 without a wallet key. A separate restartable USDC perpetual accounting foundation
 handles margin reservation, costs and recorded funding. Venue-bound models,
-recorded-funding integration and liquidation rules remain integration steps. Live execution
-is disabled.
+recorded-funding integration and liquidation rules remain integration steps.
+Recent Hyperliquid history can now prepare all eight markets' causal features,
+execution labels and purged research partitions in one command. Live execution is disabled.
 
 ## Verified starting environment
 
@@ -1510,3 +1511,57 @@ application, preventing retrospective future-data use. Repeating the adapter
 does not charge another settlement or create a trade. Observed oracle proxies
 remain estimates in account reports. Existing synthetic accounts cannot consume
 these mainnet records.
+
+## Hyperliquid research preparation for all eight markets
+
+In a second PowerShell window, while the funding collector continues running:
+
+```powershell
+& $projectPython -m local_ai_trader hyperliquid-history --config config/hyperliquid.toml
+```
+
+This one operation requests recent five-minute candles for every configured
+contract, verifies current DEX metadata and USDC collateral, and prepares causal
+features, execution-aligned gross-return/class labels and chronological
+60/20/20 partitions. The public candle API retains at most 5,000 candles per
+interval. The default requests **4,999 closed candles** (about 17.36 days), leaving
+room for an inclusive forming candle, which is removed. This is recent bootstrap
+data, not a replacement for collecting a longer venue-specific history.
+`--bars` accepts 128–4,999; small datasets may be explicitly insufficient.
+
+Prices, volumes and model inputs remain in native contract units, including
+kPEPE. Only the original eight `feature_*` columns are model inputs. Prediction
+time is the current candle's completion; entry is the next five-minute opening
+after a one-bar delay, holding is six bars (30 minutes), and outcome availability
+is conservatively eight bars (40 minutes) after prediction. Gross returns use
+`open[t+8] / open[t+2] - 1`. A fixed ±0.2% gross-return threshold produces
+down/flat/up labels; it is a research definition rather than a profitability
+threshold. Fees and funding are excluded from gross labels and must be considered
+by the eventual cost-aware decision/account adapters.
+
+Missing candles are reported by timestamp and never filled. Every contiguous
+segment restarts feature warmup and removes unknown trailing labels, so neither
+rolling statistics nor future returns cross a gap. Short segments contribute no
+research rows. Labels must be known **strictly before** the next partition's
+first prediction, including removal at the equality boundary. Prepared markets
+require at least 128 training, 64 validation and 64 test rows after purging;
+insufficient markets preserve their raw/cleaned data and are named explicitly.
+These minimums are dataset checks, not evidence of model quality or reliability.
+
+An immutable `data/hyperliquid/research/history_<UTC>_<id>/` contains exact config
+bytes, raw public responses with per-request receipt times, a `history.json`
+protocol/quality manifest, and per-contract candle, feature and partition
+Parquets. Windows-safe directory names retain original contract identifiers in
+metadata. Atomic staging, checksums and a full reconstruction audit verify each
+derived artifact before publication; failures leave existing bundles intact.
+`load_history_bundle` is a **preparation audit** that reads all three partitions.
+Future fitting code must read only its declared partitions and must not invoke
+that full audit while promising to leave reserved test outcomes unopened.
+
+A genuine mainnet run prepared all eight markets with 4,999 closed candles,
+4,979 research rows, 2,979 training / 988 validation / 996 reserved test rows, and
+eight purged labels at each earlier boundary. This prepares data without fitting
+models, estimating validated reliability, scoring a strategy or starting the
+30-day paper trial. Original Coinbase experiments remain separate. The next
+model milestone will use this venue-specific data rather than connect Coinbase
+checkpoints to new markets.
