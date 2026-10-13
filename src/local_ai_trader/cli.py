@@ -113,6 +113,9 @@ def main(argv: list[str] | None = None) -> int:
     execution_targets = commands.add_parser("execution-targets", help="Build delayed-entry open-to-open labels for a return forecaster")
     execution_targets.add_argument("path", type=Path, help="Original complete candle Parquet")
     execution_targets.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    execution_features = commands.add_parser("execution-features", help="Build causal features from an audited execution target bundle")
+    execution_features.add_argument("path", type=Path, help="Directory containing labels.parquet and targets.json")
+    execution_features.add_argument("--config", type=Path, default=Path("config/settings.toml"))
     features = commands.add_parser("features", help="Build trailing features from a labelled dataset")
     features.add_argument("path", type=Path, help="Labelled target Parquet file")
     features.add_argument("--config", type=Path, default=Path("config/settings.toml"))
@@ -177,6 +180,10 @@ def main(argv: list[str] | None = None) -> int:
             create_execution_target_dataset(arguments.path, load_settings(arguments.config))
         elif arguments.command == "features":
             create_feature_dataset(arguments.path, load_settings(arguments.config))
+        elif arguments.command == "execution-features":
+            from local_ai_trader.forecast.features import create_execution_feature_dataset
+
+            create_execution_feature_dataset(arguments.path, load_settings(arguments.config))
         elif arguments.command == "split":
             create_split_dataset(arguments.path, load_settings(arguments.config))
         elif arguments.command == "baseline":

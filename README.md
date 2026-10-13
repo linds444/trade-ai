@@ -908,8 +908,42 @@ An immutable `data/processed/execution_targets/<source-stem>_h6_l1/` contains
 `labels.parquet` and `targets.json`. Metadata records source and label hashes,
 timing offsets, formulas, conservative availability, costs and future-only
 columns. Atomic publication prevents partial bundles and rejects source changes.
-This command does not fit a model or evaluate a new strategy. Causal features
-and training for the return forecaster are the next preparation steps.
+This command does not fit a model or evaluate a new strategy.
+
+## Causal features for execution-aligned returns
+
+Build the same eight trailing OHLCV features for the new return targets:
+
+```powershell
+& $projectPython -m local_ai_trader execution-features data/processed/execution_targets/coinbase_BTC-USD_300s_1778284800_1790640000_h6_l1
+& $projectPython -m local_ai_trader execution-features data/processed/execution_targets/coinbase_ETH-USD_300s_1778284800_1790640000_h6_l1
+```
+
+The command takes a target **bundle directory**, not the classifier's target
+Parquet. It verifies the original candle, label and metadata hashes, reconstructs
+the execution targets from their original candles, and checks the complete
+stored schema and timing contract before building features. Keep the original
+candle Parquet at the path recorded in `targets.json`.
+
+Only the nine completed causal candle columns reach feature calculation.
+All future entry/exit prices, times, returns and availability are attached
+afterward as labels. Changing future labels or future market data cannot change
+earlier model inputs. Models must select the ordered eight `feature_names`,
+never every numeric column. No normalization or global statistics are fitted;
+eventual scaling must use the training partition alone.
+
+With default settings, **41,176 execution labels become 41,164 feature rows**
+after removing 12 leading warmup rows. The eight-bar label availability remains
+unchanged and must drive future split purging. Existing classifier splits and
+their six-bar purge cannot be reused for these targets.
+
+An immutable `data/processed/execution_features/<target-bundle-name>/` contains
+`features.parquet` and `features.json`. Publication is atomic, including long
+Windows paths without a registry change. Metadata records the feature allowlist,
+all future-only columns, upstream hashes, output hash, frozen target costs and
+timing, and feature parameters. Current fee changes do not rewrite old diagnostic
+net labels. No source artifact is modified, and reruns cannot overwrite output.
+This stage does not train a return model or measure strategy performance.
 
 ## Next milestones
 
