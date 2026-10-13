@@ -110,13 +110,27 @@ def _millisecond(value):
     return datetime.fromtimestamp(value / 1000, timezone.utc)
 
 
+class BookTimestampError(ValueError):
+    """A rejected exchange timestamp, with enough detail to diagnose the cause."""
+
+    def __init__(self, coin, stamp, now, max_age):
+        self.coin = coin
+        self.age_seconds = (now - stamp).total_seconds()
+        reason = "future-dated" if self.age_seconds < 0 else "stale"
+        hint = ("Check Windows automatic time synchronization; the local clock may be behind the exchange."
+                if self.age_seconds < 0 else "The exchange response is old or acquisition took too long.")
+        super().__init__(f"Hyperliquid {coin} order book is {reason}: age={self.age_seconds:.6f}s; "
+                         f"exchange_utc={stamp.isoformat()}; local_utc={now.isoformat()}; "
+                         f"require 0 <= age < {max_age}s. {hint}")
+
+
 def parse_book(payload: dict, coin: str, now: datetime, max_age: int) -> dict:
     if not isinstance(payload, dict) or payload.get("coin") != coin or not isinstance(payload.get("levels"), list) or len(payload["levels"]) != 2 or not all(isinstance(side, list) and side for side in payload["levels"]):
         raise ValueError("Hyperliquid order book is missing, empty or for another market")
     stamp = _millisecond(payload.get("time"))
     age = (_utc(now) - stamp).total_seconds()
     if age < 0 or age >= max_age:
-        raise ValueError("Hyperliquid order book is future-dated or stale")
+        raise BookTimestampError(coin, stamp, _utc(now), max_age)
     prices, sizes = [], []
     for index, side in enumerate(payload["levels"]):
         side_prices = []
@@ -260,10 +274,11 @@ class HyperliquidPublicClient:
             for coin in self.settings.coins:
                 dex_coins.setdefault(BY_COIN[coin].dex, []).append(coin)
             context_receipts = {}
-            with ThreadPoolExecutor(max_workers=min(8, len(dex_coins) + 2 * len(self.settings.coins))) as pool:
+            # Fetch and process history before requesting executable quotes.
+            # A slow/retried candle request must not age an already received book.
+            with ThreadPoolExecutor(max_workers=min(8, len(dex_coins) + len(self.settings.coins))) as pool:
                 jobs = {(f"{dex}_contexts" if dex else "contexts"): pool.submit(self._contexts, dex) for dex in dex_coins}
                 for coin in self.settings.coins:
-                    jobs[f"{coin}_book"] = pool.submit(self.info, {"type": "l2Book", "coin": coin})
                     jobs[f"{coin}_candles"] = pool.submit(self.info, {"type": "candleSnapshot", "req": {"coin": coin, "interval": "5m", "startTime": start * 1000, "endTime": end * 1000}})
                 for name, job in jobs.items():
                     if name == "contexts" or name.endswith("_contexts"):
@@ -286,13 +301,34 @@ class HyperliquidPublicClient:
                 contexts.update(parse_contexts(metadata, tuple(coins), context_receipts[key]))
             assets, frames, feature_frames = {}, {}, {}
             for coin in self.settings.coins:
-                book = parse_book(raw[f"{coin}_book"], coin, now, self.settings.maximum_book_age_seconds)
                 frame, quality = parse_candles(raw[f"{coin}_candles"], coin, start, end)
                 features = build_features(frame, SECONDS, self.settings.momentum_steps, self.settings.rolling_window)
                 if frame.available_at.iloc[-1] != pd.Timestamp(end, unit="s", tz="UTC"):
                     raise ValueError("Latest Hyperliquid completed candle is stale")
-                assets[coin] = {**contexts[coin], "book": book, "quality": asdict(quality), "last_prediction_time": features.available_at.iloc[-1].isoformat(),
+                assets[coin] = {**contexts[coin], "quality": asdict(quality), "last_prediction_time": features.available_at.iloc[-1].isoformat(),
                                 "feature_rows": len(features), "latest_features": {name: float(features[name].iloc[-1]) for name in FEATURE_COLUMNS}}
+                frames[coin], feature_frames[coin] = frame, features
+            with ThreadPoolExecutor(max_workers=min(8, len(self.settings.coins))) as pool:
+                jobs = {coin: pool.submit(self.info, {"type": "l2Book", "coin": coin}) for coin in self.settings.coins}
+                for coin, job in jobs.items():
+                    raw[f"{coin}_book"] = job.result()
+            now = _utc(self.clock())
+            if int(now.timestamp()) // SECONDS * SECONDS != end:
+                if boundary_attempt == 0:
+                    continue
+                raise ValueError("Candle boundary advanced while fetching Hyperliquid books")
+            try:
+                books = {coin: parse_book(raw[f"{coin}_book"], coin, now, self.settings.maximum_book_age_seconds) for coin in self.settings.coins}
+            except BookTimestampError as error:
+                # Refresh once on stale responses, preserving exchange times.
+                # Never mask a clock that places fresh exchange data in the future.
+                if error.age_seconds >= 0 and boundary_attempt == 0:
+                    LOGGER.warning("%s Retrying observation once with new exchange responses.", error)
+                    continue
+                raise
+            for coin in self.settings.coins:
+                book = books[coin]
+                assets[coin]["book"] = book
                 market = BY_COIN[coin]
                 assets[coin]["market_state"] = asdict(live_market_state(market, contexts[coin], book, assets[coin]["latest_features"]))
                 assets[coin]["contract_identifier"] = coin
@@ -304,7 +340,6 @@ class HyperliquidPublicClient:
                 else:
                     multiplier = 1
                 assets[coin]["taker_fee_bps_assumption"] = self.settings.taker_fee_bps * multiplier
-                frames[coin], feature_frames[coin] = frame, features
             report = {"schema_version": 2, "mode": "public_mainnet_data_only", "exchange": "hyperliquid", "instrument": "perpetual", "collateral_currency": "USDC",
                       "configured_leverage": 1, "long_only": True, "created_at": now.isoformat(), "candle_seconds": SECONDS, "prediction_horizon_minutes": 30,
                       "assets": assets, "features": list(FEATURE_COLUMNS), "taker_fee_bps_assumption": self.settings.taker_fee_bps,

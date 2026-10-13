@@ -1222,7 +1222,7 @@ Inspect a saved account without changing it:
 
 ## Hyperliquid perpetual market-data integration
 
-The current deployment target is **Hyperliquid BTC/ETH perpetuals, 1× leverage,
+The current deployment target is **eight Hyperliquid perpetuals, 1× leverage,
 long only, with USDC collateral**. Its separate `config/hyperliquid.toml` records
 that contract, a provisional base-tier taker fee of **4.5 bps (0.045%) per side**,
 and a minimum 30-day forward paper period. No referral, volume or staking discount
@@ -1287,6 +1287,15 @@ millisecond timestamp and must be strictly under 30 seconds at validation and
 again before publication. Reception does not freshen a stale book. Asset contexts
 do not include an exchange timestamp; their reception time is recorded separately
 and is not represented as an exchange event time.
+
+Candle history and features are processed before books are requested, so a slow
+history response cannot age an already received quote. A stale capture retries
+the observation once using new exchange responses; persistently stale quotes
+still refuse publication. A future-dated quote refuses immediately. Timestamp
+errors identify the contract, signed age, exchange UTC, local UTC and required
+age range. A negative age can indicate a PC clock behind exchange time; check
+Windows **Settings → Time & language → Date & time → Sync now**. The collector
+never changes the PC clock, permits future quotes or increases the age limit.
 
 The default window contains 24 completed candles and 12 feature rows after the
 original warmup. Hyperliquid's inclusive candle-close millisecond becomes

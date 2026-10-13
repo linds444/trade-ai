@@ -117,6 +117,113 @@ def test_invalid_future_stale_or_crossed_books_are_refused(mutation):
         feed.parse_book(payload, "BTC", NOW, 30)
 
 
+@pytest.mark.parametrize("offset,reason", [(0.125, "future-dated"), (-30, "stale")])
+def test_book_timestamp_error_identifies_market_signed_age_and_both_clocks(offset, reason):
+    stamp = NOW + timedelta(seconds=offset)
+    with pytest.raises(feed.BookTimestampError) as caught:
+        feed.parse_book(book("ETH", stamp), "ETH", NOW, 30)
+    error = caught.value
+    assert error.coin == "ETH"
+    assert error.age_seconds == pytest.approx(-offset)
+    assert reason in str(error)
+    assert f"exchange_utc={stamp.isoformat()}" in str(error)
+    assert f"local_utc={NOW.isoformat()}" in str(error)
+    assert "require 0 <= age < 30s" in str(error)
+    if offset > 0:
+        assert "Windows automatic time synchronization" in str(error)
+
+
+def test_slow_history_and_feature_processing_finish_before_any_book_is_requested(client, monkeypatch):
+    current = [NOW]
+    processed = []
+    original_info, original_build = client.info, feed.build_features
+    def build(*args, **kwargs):
+        result = original_build(*args, **kwargs)
+        processed.append(result.symbol.iloc[0])
+        return result
+    def info(payload):
+        if payload["type"] == "candleSnapshot":
+            current[0] = NOW + timedelta(seconds=35)
+        if payload["type"] == "l2Book":
+            assert len(processed) == 2
+            return book(payload["coin"], current[0])
+        return original_info(payload)
+    monkeypatch.setattr(client, "clock", lambda: current[0])
+    monkeypatch.setattr(client, "info", info)
+    monkeypatch.setattr(feed, "build_features", build)
+    report, raw, _, _ = client.snapshot()
+    assert all(x["book"]["age_seconds"] == 0 for x in report["assets"].values())
+    assert raw["BTC_book"]["time"] == int((NOW + timedelta(seconds=35)).timestamp() * 1000)
+
+
+def test_one_stale_capture_recovers_only_from_new_exchange_response(config, client, monkeypatch, caplog):
+    counts = {"BTC": 0, "ETH": 0}
+    original = client.info
+    def info(payload):
+        if payload["type"] == "l2Book":
+            coin = payload["coin"]
+            counts[coin] += 1
+            return book(coin, NOW - timedelta(seconds=31) if counts[coin] == 1 else NOW)
+        return original(payload)
+    monkeypatch.setattr(client, "info", info)
+    output, report = feed.save_hyperliquid_snapshot(client, config)
+    assert counts == {"BTC": 2, "ETH": 2}
+    assert "Retrying observation once" in caplog.text
+    assert all(x["book"]["age_seconds"] == 0 for x in report["assets"].values())
+    assert json.loads((output / "raw.json").read_text(encoding="utf-8"))["BTC_book"]["time"] == int(NOW.timestamp() * 1000)
+    assert len(list(client.settings.observations.iterdir())) == 1
+
+
+def test_persistently_stale_capture_stops_after_one_retry_without_publication(config, client, monkeypatch):
+    calls = []
+    original = client.info
+    def info(payload):
+        if payload["type"] == "l2Book":
+            calls.append(payload["coin"])
+            return book(payload["coin"], NOW - timedelta(seconds=31))
+        return original(payload)
+    monkeypatch.setattr(client, "info", info)
+    with pytest.raises(feed.BookTimestampError, match="stale"):
+        feed.save_hyperliquid_snapshot(client, config)
+    assert len(calls) == 4
+    assert not client.settings.observations.exists()
+
+
+def test_future_book_never_retries_or_shifts_clock_to_make_it_pass(config, client, monkeypatch):
+    calls = []
+    original = client.info
+    def info(payload):
+        if payload["type"] == "l2Book":
+            calls.append(payload["coin"])
+            return book(payload["coin"], NOW + timedelta(milliseconds=1))
+        return original(payload)
+    monkeypatch.setattr(client, "info", info)
+    with pytest.raises(feed.BookTimestampError, match="future-dated"):
+        feed.save_hyperliquid_snapshot(client, config)
+    assert len(calls) == 2
+    assert client.clock() == NOW
+    assert not client.settings.observations.exists()
+
+
+def test_boundary_advanced_during_book_fetch_restarts_complete_window(client, monkeypatch):
+    current, calls = [NOW], []
+    original = client.info
+    def info(payload):
+        if payload["type"] == "l2Book":
+            current[0] = NOW + timedelta(seconds=300)
+            return book(payload["coin"], current[0])
+        if payload["type"] == "candleSnapshot":
+            calls.append(payload["req"]["endTime"])
+        return original(payload)
+    monkeypatch.setattr(client, "clock", lambda: current[0])
+    monkeypatch.setattr(client, "info", info)
+    report, _, frames, _ = client.snapshot()
+    assert len(calls) == 4
+    assert set(calls) == {END * 1000, (END + 300) * 1000}
+    assert frames["BTC"].available_at.iloc[-1] == pd.Timestamp(END + 300, unit="s", tz="UTC")
+    assert report["created_at"] == current[0].isoformat()
+
+
 def test_contexts_capture_funding_sign_and_do_not_invent_exchange_timestamp():
     result = feed.parse_contexts(contexts(), ("BTC", "ETH"), NOW)
     assert result["BTC"]["hourly_funding_rate"] == 0.0000125
