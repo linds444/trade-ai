@@ -271,6 +271,17 @@ def test_single_causal_row_inference_needs_no_future_label_columns(prepared):
 
 
 def test_deep_windows_paths_and_hip3_identifiers(tmp_path, monkeypatch):
+    import torch
+    import xgboost
+    original_load, original_save = xgboost.XGBClassifier.load_model, torch.save
+    def memory_load(model, value):
+        assert isinstance(value, bytearray), "Native XGBoost must not open extended Windows filenames"
+        return original_load(model, value)
+    def stream_save(value, stream, *args, **kwargs):
+        assert hasattr(stream, "write"), "Native Torch writer must receive an open Python file"
+        return original_save(value, stream, *args, **kwargs)
+    monkeypatch.setattr(xgboost.XGBClassifier, "load_model", memory_load)
+    monkeypatch.setattr(torch, "save", stream_save)
     root = native_path(tmp_path / ("deep-"+"x"*70) / ("nested-"+"y"*70) / ("root-"+"z"*70))
     prepared = make_history(root, monkeypatch, coins=("xyz:HOOD", "kPEPE"))
     output, report = train.train_hyperliquid_models(prepared, device="cpu", recipe=FAST)
@@ -278,6 +289,29 @@ def test_deep_windows_paths_and_hip3_identifiers(tmp_path, monkeypatch):
     assert train.load_saved_market(output, "xyz:HOOD")[0]["symbol"] == "xyz:HOOD-USDC"
     assert train.load_saved_market(output, "kPEPE")[0]["coin"] == "kPEPE"
     assert set(report["markets"]) == {"xyz:HOOD", "kPEPE"}
+
+
+def test_reader_preserves_compatibility_with_previous_native_model_files(prepared, tmp_path):
+    import torch
+    from local_ai_trader.models.mlp import fit_mlp, predict_mlp_checkpoint
+    tables, _, _, _ = train.load_training_inputs(prepared)
+    frame = tables["BTC"]["train"]
+    root = native_path(tmp_path / "old-native-models")
+    root.mkdir()
+    boosted = train.fit_boosting(frame, FAST)
+    boosted.save_model(root / "xgboost.json")
+    checkpoint = {"schema_version": 1, "model_type": "xgboost", "calibration": "none", "preprocessing": "identity",
+                  "probability_postprocessing": "float64_row_normalization", "feature_names": list(train.FEATURE_COLUMNS),
+                  "class_names": list(train.CLASS_NAMES), "model_file": "xgboost.json", "model_sha256": file_digest(root / "xgboost.json")}
+    np.testing.assert_allclose(train.predict_boosting_checkpoint(checkpoint, frame, root)["xgboost"], train.predict_boosting(boosted, frame), rtol=1e-7, atol=1e-8)
+    recipe = train.replace(FAST, mlp=train.replace(FAST.mlp, device="cpu"))
+    neural = fit_mlp(frame, recipe)
+    torch.save(neural.model.state_dict(), root / "mlp_state.pt")
+    checkpoint = {"schema_version": 1, "model_type": "mlp", "calibration": "none", "preprocessing": "training_population_standardization",
+                  "probability_postprocessing": "float64_softmax", "feature_names": list(train.FEATURE_COLUMNS), "class_names": list(train.CLASS_NAMES),
+                  "model_file": "mlp_state.pt", "model_sha256": file_digest(root / "mlp_state.pt"), "model_config": train.asdict(recipe.mlp),
+                  "scaler_mean": neural.mean.tolist(), "scaler_scale": neural.scale.tolist()}
+    np.testing.assert_allclose(predict_mlp_checkpoint(checkpoint, frame, root)["mlp"], neural.predict(frame), rtol=1e-7, atol=1e-8)
 
 
 def test_cli_exposes_explicit_device_and_saved_directory(prepared, monkeypatch, capsys):

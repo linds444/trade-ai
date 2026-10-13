@@ -18,7 +18,7 @@ from sklearn.preprocessing import StandardScaler
 import torch
 from torch import nn
 
-from local_ai_trader.data.storage import write_json, write_parquet
+from local_ai_trader.data.storage import native_path, write_json, write_parquet
 from local_ai_trader.features.build_features import FEATURE_COLUMNS
 from local_ai_trader.models.baseline import CLASS_NAMES, encode_labels, feature_matrix
 from local_ai_trader.models.evaluate import evaluate_probabilities
@@ -75,6 +75,12 @@ def predict_model(model: MarketMLP, inputs: torch.Tensor, device: torch.device, 
                 raise ValueError("MLP inference produced nonfinite logits")
             chunks.append(torch.softmax(logits.to(dtype=torch.float64), dim=1).cpu().numpy())
     return np.concatenate(chunks)
+
+
+def save_mlp_weights(model: MarketMLP, path: Path) -> None:
+    """Avoid passing long Windows filenames to PyTorch's native zip writer."""
+    with native_path(path).open("wb") as stream:
+        torch.save({name: value.detach().cpu() for name, value in model.state_dict().items()}, stream)
 
 
 @dataclass
@@ -169,11 +175,12 @@ def predict_mlp_checkpoint(checkpoint: dict, frame: pd.DataFrame, run_directory:
     config = load_mlp_settings(checkpoint["model_config"])
     target_device = training_device(device)
     torch.set_num_threads(config.cpu_threads)
-    path = run_directory / MODEL_FILENAME
+    path = native_path(run_directory / MODEL_FILENAME)
     if file_digest(path) != checkpoint["model_sha256"]:
         raise ValueError("MLP weights differ from the frozen checkpoint")
     model = MarketMLP(config.hidden_sizes, config.dropout)
-    state = torch.load(path, map_location="cpu", weights_only=True)
+    with path.open("rb") as stream:
+        state = torch.load(stream, map_location="cpu", weights_only=True)
     model.load_state_dict(state, strict=True)
     values = predict_model(model.to(target_device), standardized_inputs(frame, mean, scale), target_device, config.batch_size)
     if file_digest(path) != checkpoint["model_sha256"]:
@@ -194,7 +201,7 @@ def train_mlp_experiment(directory: Path, settings: Settings) -> tuple[Path, dic
     output = settings.models_dir / run_id
     staging = Path(tempfile.mkdtemp(prefix=".mlp-staging-", dir=settings.models_dir))
     try:
-        torch.save({name: value.detach().cpu() for name, value in fitted.model.state_dict().items()}, staging / MODEL_FILENAME)
+        save_mlp_weights(fitted.model, staging / MODEL_FILENAME)
         checkpoint = {
             "schema_version": 1, "model_type": "mlp", "calibration": "none",
             "preprocessing": "training_population_standardization", "probability_postprocessing": "float64_softmax",

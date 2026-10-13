@@ -1615,7 +1615,10 @@ checkpoints, native weights, temperatures, later-validation predictions, metrics
 training history/hardware, recipe and source hashes. Output follows the history
 archive's data root, so relative paths in a copied config do not create a nested
 project. Failed fits, changed inputs and failed writes publish no partial batch.
-Native long Windows paths require no system registry changes.
+XGBoost native JSON is saved through Python IO and restored from checked bytes;
+PyTorch weights use open Python file handles. This avoids native filename limits
+on deep Windows directories while preserving compatibility with earlier model
+files. No system registry changes are required.
 
 `predict_saved_market` provides calibrated probabilities and gross-return point
 forecasts from explicitly selected saved models on causal rows, without future

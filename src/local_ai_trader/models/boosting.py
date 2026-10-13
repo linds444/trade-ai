@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 
-from local_ai_trader.data.storage import write_json, write_parquet
+from local_ai_trader.data.storage import native_path, write_json, write_parquet
 from local_ai_trader.features.build_features import FEATURE_COLUMNS
 from local_ai_trader.models.baseline import CLASS_NAMES, encode_labels, feature_matrix
 from local_ai_trader.models.evaluate import evaluate_probabilities
@@ -59,6 +59,17 @@ def predict_boosting(model: xgb.XGBClassifier, frame: pd.DataFrame) -> np.ndarra
     return values / values.sum(axis=1, keepdims=True)
 
 
+def save_boosting_model(model: xgb.XGBClassifier, path: Path) -> None:
+    """Keep native JSON, using Python IO for extended Windows filenames."""
+    booster = model.get_booster()
+    previous = booster.attr("scikit_learn")
+    try:
+        booster.set_attr(scikit_learn=json.dumps({"_estimator_type": "classifier"}))
+        native_path(path).write_bytes(booster.save_raw(raw_format="json"))
+    finally:
+        booster.set_attr(scikit_learn=previous)
+
+
 def predict_boosting_checkpoint(checkpoint: dict, frame: pd.DataFrame, run_directory: Path) -> dict[str, np.ndarray]:
     """Restore saved native weights and verify their hash and input/output order."""
     if (
@@ -71,11 +82,11 @@ def predict_boosting_checkpoint(checkpoint: dict, frame: pd.DataFrame, run_direc
         or checkpoint.get("model_file") != MODEL_FILENAME
     ):
         raise ValueError("Incompatible XGBoost checkpoint schema, preprocessing or feature/class order")
-    path = run_directory / MODEL_FILENAME
+    path = native_path(run_directory / MODEL_FILENAME)
     if file_digest(path) != checkpoint["model_sha256"]:
         raise ValueError("XGBoost model differs from the frozen checkpoint")
     model = xgb.XGBClassifier(n_jobs=1, device="cpu")
-    model.load_model(path)
+    model.load_model(bytearray(path.read_bytes()))
     booster = model.get_booster()
     learner = json.loads(booster.save_config())["learner"]
     if (
@@ -105,7 +116,7 @@ def train_boosting_experiment(directory: Path, settings: Settings) -> tuple[Path
     output = settings.models_dir / run_id
     staging = Path(tempfile.mkdtemp(prefix=".boosting-staging-", dir=settings.models_dir))
     try:
-        fitted.save_model(staging / MODEL_FILENAME)
+        save_boosting_model(fitted, staging / MODEL_FILENAME)
         checkpoint = {
             "schema_version": 1, "model_type": "xgboost", "calibration": "none",
             "preprocessing": "identity", "feature_names": list(FEATURE_COLUMNS),

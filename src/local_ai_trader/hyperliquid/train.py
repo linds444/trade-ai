@@ -17,6 +17,8 @@ from uuid import uuid4
 
 import numpy as np
 import pandas as pd
+import sklearn
+import xgboost
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 
@@ -30,7 +32,7 @@ from local_ai_trader.hyperliquid.feed import load_hyperliquid_settings
 from local_ai_trader.hyperliquid.history import LABEL_COLUMNS, research_protocol
 from local_ai_trader.hyperliquid.markets import BY_COIN
 from local_ai_trader.models.baseline import CLASS_NAMES, encode_labels, feature_matrix, fit_baselines, predict_checkpoint
-from local_ai_trader.models.boosting import fit_boosting, predict_boosting, predict_boosting_checkpoint
+from local_ai_trader.models.boosting import fit_boosting, predict_boosting, predict_boosting_checkpoint, save_boosting_model
 from local_ai_trader.models.evaluate import evaluate_probabilities
 from local_ai_trader.models.train import file_digest
 from local_ai_trader.settings import BoostingSettings, CalibrationSettings, MLPSettings
@@ -208,15 +210,14 @@ def _fit_market(train, recipe, root):
         unavailable["logistic"] = "fewer_than_two_training_classes"
     if len(np.unique(labels)) == 3:
         boosted = fit_boosting(train, recipe)
-        boosted.save_model(root / "xgboost.json")
+        save_boosting_model(boosted, root / "xgboost.json")
         classifiers["xgboost"] = {"schema_version": 1, "model_type": "xgboost", "calibration": "none", "preprocessing": "identity",
                                   "probability_postprocessing": "float64_row_normalization", "feature_names": list(FEATURE_COLUMNS), "class_names": list(CLASS_NAMES),
                                   "model_file": "xgboost.json", "model_sha256": file_digest(root / "xgboost.json")}
         np.testing.assert_allclose(predict_boosting_checkpoint(classifiers["xgboost"], train, root)["xgboost"], predict_boosting(boosted, train), rtol=1e-7, atol=1e-8)
-        from local_ai_trader.models.mlp import fit_mlp, predict_mlp_checkpoint
-        import torch
+        from local_ai_trader.models.mlp import fit_mlp, predict_mlp_checkpoint, save_mlp_weights
         neural = fit_mlp(train, recipe)
-        torch.save({key: value.detach().cpu() for key, value in neural.model.state_dict().items()}, root / "mlp_state.pt")
+        save_mlp_weights(neural.model, root / "mlp_state.pt")
         classifiers["mlp"] = {"schema_version": 1, "model_type": "mlp", "calibration": "none", "preprocessing": "training_population_standardization",
                               "probability_postprocessing": "float64_softmax", "feature_names": list(FEATURE_COLUMNS), "class_names": list(CLASS_NAMES),
                               "model_file": "mlp_state.pt", "model_sha256": file_digest(root / "mlp_state.pt"), "model_config": asdict(recipe.mlp),
@@ -308,6 +309,7 @@ def train_hyperliquid_models(directory, *, device="cuda", recipe=None):
     # Refuse missing CUDA before fitting or publishing any part of a batch.
     try:
         from local_ai_trader.models.mlp import training_device
+        import torch
     except ImportError as error:
         raise ValueError("PyTorch is unavailable in this project interpreter; use the verified CUDA environment") from error
     training_device(device)
@@ -323,7 +325,9 @@ def train_hyperliquid_models(directory, *, device="cuda", recipe=None):
               "recipe": asdict(recipe), "coins": list(settings.coins), "protocol": source["protocol"],
               "history_manifest_sha256": source["history_manifest_sha256"], "source_config_sha256": source["input_config_sha256"],
               "input_hashes": {str(path): digest for path, digest in inputs.items()}, "markets": {},
-              "runtime_versions": {"python": platform.python_version(), "numpy": np.__version__, "pandas": pd.__version__},
+              "runtime_versions": {"python": platform.python_version(), "numpy": np.__version__, "pandas": pd.__version__,
+                                   "scikit_learn": sklearn.__version__, "xgboost": xgboost.__version__,
+                                   "torch": torch.__version__, "torch_cuda_build": torch.version.cuda},
               "test_opened": False, "test_hashed": False, "forward_strategy_started": False, "paper_fills_created": False, "live_execution_enabled": False}
     try:
         for coin in settings.coins:
