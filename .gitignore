@@ -13,6 +13,7 @@ data/raw/
 data/processed/
 data/models/
 data/paper/
+data/hyperliquid/
 runs/
 logs/
 build/

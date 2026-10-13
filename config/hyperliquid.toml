@@ -1,0 +1,30 @@
+[market]
+# Public mainnet observations; all execution remains local paper simulation.
+exchange = "hyperliquid"
+instrument = "perpetual"
+coins = ["BTC", "ETH"]
+collateral_currency = "USDC"
+leverage = 1
+long_only = true
+candle_interval = "5m"
+prediction_horizon_minutes = 30
+
+[features]
+momentum_steps = 6
+rolling_window = 12
+
+[feed]
+history_bars = 24
+maximum_book_age_seconds = 30
+poll_seconds = 10
+timeout_seconds = 10
+max_attempts = 3
+
+[paper]
+# Base-tier taker assumption; fee discounts are not assumed.
+taker_fee_bps = 4.5
+minimum_forward_days = 30
+live_execution_enabled = false
+
+[paths]
+observations = "data/hyperliquid/live"

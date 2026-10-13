@@ -114,6 +114,9 @@ def main(argv: list[str] | None = None) -> int:
     paper_demo.add_argument("--config", type=Path, default=Path("config/settings.toml"))
     paper_status = commands.add_parser("paper-status", help="Audit an existing paper SQLite account without fetching prices")
     paper_status.add_argument("path", type=Path, help="Path to account.sqlite")
+    hyperliquid = commands.add_parser("hyperliquid-feed", help="Validate public Hyperliquid mainnet books and completed candles; no trading")
+    hyperliquid.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
+    hyperliquid.add_argument("--watch", action="store_true", help="Save each new completed 5-minute window until Ctrl+C")
     inspect = commands.add_parser("inspect", help="Query a Parquet dataset using DuckDB")
     inspect.add_argument("path", type=Path)
     targets = commands.add_parser("targets", help="Build causal-time-labelled forward-return targets")
@@ -204,6 +207,10 @@ def main(argv: list[str] | None = None) -> int:
             from local_ai_trader.paper.demo import paper_status
 
             paper_status(arguments.path)
+        elif arguments.command == "hyperliquid-feed":
+            from local_ai_trader.hyperliquid.feed import run_hyperliquid_feed
+
+            run_hyperliquid_feed(arguments.config, watch=arguments.watch)
         elif arguments.command == "execution-targets":
             from local_ai_trader.forecast.targets import create_execution_target_dataset
 

@@ -1,11 +1,14 @@
 # Trade AI
 
 A local, Windows-first market research project for an NVIDIA RTX 3060 (12 GB).
-The current milestone collects and validates historical data, builds
-forward-return targets, computes causal features, and creates purged chronological
-splits, and compares naive/logistic probability baselines on validation and
-held-out test data using separate commands.
-It does not yet make trading recommendations or execute orders.
+Research includes causal features and purged splits, calibrated classifier and
+return baselines, walk-forward cost accounting, decision/risk checks and a
+persistent spot-paper execution foundation.
+
+The current deployment target is **Hyperliquid BTC/ETH perpetuals, 1× leverage,
+long only**. Its public mainnet data feed validates and archives live observations
+without a wallet key. Funding-aware USDC paper accounting and venue-bound models
+are the next integration steps. Live execution is disabled.
 
 ## Verified starting environment
 
@@ -1217,10 +1220,89 @@ Inspect a saved account without changing it:
 & $projectPython -m local_ai_trader paper-status "data/paper/<account-directory>/account.sqlite"
 ```
 
+## Hyperliquid perpetual market-data integration
+
+The current deployment target is **Hyperliquid BTC/ETH perpetuals, 1× leverage,
+long only, with USDC collateral**. Its separate `config/hyperliquid.toml` records
+that contract, a provisional base-tier taker fee of **4.5 bps (0.045%) per side**,
+and a minimum 30-day forward paper period. No referral, volume or staking discount
+is assumed. This configuration has no wallet, private key or signing settings;
+`live_execution_enabled` must remain false.
+
+Read actual public **mainnet** market data without an API key:
+
+```powershell
+& $projectPython -m local_ai_trader hyperliquid-feed --config config/hyperliquid.toml
+```
+
+The command reads only the public `https://api.hyperliquid.xyz/info` endpoint:
+perpetual metadata/asset contexts, BTC/ETH order books and recent five-minute
+candles. It does not use testnet prices. It has no exchange-order, withdrawal,
+wallet or signing client. Its request allowlist also refuses unrequested action
+types and extra signature/wallet fields. Transient HTTP/rate-limit errors receive
+bounded retries; permanent failures surface without switching data sources.
+
+The console prints best bid/ask, mark and oracle prices, current hourly funding,
+completed candle counts and causal feature counts. Book age uses the exchange's
+millisecond timestamp and must be strictly under 30 seconds at validation and
+again before publication. Reception does not freshen a stale book. Asset contexts
+do not include an exchange timestamp; their reception time is recorded separately
+and is not represented as an exchange event time.
+
+The default window contains 24 completed candles and 12 feature rows after the
+original warmup. Hyperliquid's inclusive candle-close millisecond becomes
+`available_at = open + 300 seconds`. The current unfinished candle is excluded
+even if the endpoint returns it. Missing intervals, conflicting duplicates,
+wrong coins/intervals, invalid OHLCV, crossed/empty books and invalid contract
+metadata are refused. An interval boundary crossed during fetching is retried
+with a new completed window. The existing eight trailing features are computed
+without labels, fitted scaling or model inference.
+
+A new immutable `data/hyperliquid/live/snapshot_<UTC>_<id>/` contains raw public
+responses, BTC/ETH completed candle and feature Parquets, and `snapshot.json` with
+configuration/artifact hashes, quality, source times and contract context. Frames
+use `exchange = hyperliquid` and symbols `BTC-USDC` / `ETH-USDC`; the manifest
+explicitly identifies perpetuals. Publication is atomic and supports long native
+Windows paths. A stale book, advanced candle boundary or changed config before
+publication leaves no published bundle. Runtime observations are ignored by Git.
+
+Optionally collect each new completed five-minute window until Ctrl+C:
+
+```powershell
+& $projectPython -m local_ai_trader hyperliquid-feed --config config/hyperliquid.toml --watch
+```
+
+Watch mode checks for the next boundary every ten seconds and archives once per
+completed window, avoiding repeated full-window files within the same candle.
+Data errors are logged and retried; stopping is clean. This is a data collector,
+not a continuous trading or liquidation service.
+
+Hyperliquid pays funding hourly. A positive rate charges longs; a negative rate
+credits them. The documented payment is **position size × oracle price × actual
+hourly funding rate**, using the oracle rather than mark price. The context's
+current rate is not guaranteed future funding. These observations do not charge
+funding to an account or fabricate paper fills/performance.
+
+The earlier Coinbase datasets/models are historical spot research, and the
+existing persistent ledger settles simulated spot buys in USD. They are not
+silently relabeled or connected as a Hyperliquid perpetual strategy. Next work
+must add USDC margin/mark-to-market/funding accounting and venue-bound model
+training/inference before starting the actual forward paper trial. Merely running
+the data collector does **not** start its performance clock. A profitable month
+must include modeled fees, slippage and funding; it is a review milestone and
+does not enable live execution automatically. Live execution requires a separate
+implementation and explicit approval at that time.
+
+Primary references: [public API](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint),
+[funding](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/funding),
+[fees](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/fees), and the
+[official Python information client](https://github.com/hyperliquid-dex/hyperliquid-python-sdk/blob/master/hyperliquid/info.py).
+
 ## Next milestones
 
-1. Connect current completed candles and saved models to a scheduled paper loop.
-2. Add a local API and dashboard showing forecasts, uncertainty, decisions,
+1. Add funding-aware USDC perpetual paper accounting and Hyperliquid-trained models.
+2. Connect the saved models and public feed to a scheduled forward paper loop.
+3. Add a local API and dashboard showing forecasts, uncertainty, decisions,
    risk refusals and paper-account results.
 
 More complex models remain conditional on evidence. Training, validation, test,
