@@ -985,6 +985,67 @@ Publication is atomic, supports long Windows paths and cannot overwrite an
 existing bundle. Existing classifier datasets and experiment protocols are
 unchanged. Return forecasting and train-only preprocessing are the next step.
 
+## Execution-aligned return baselines
+
+Fit two point-forecast baselines from the new regression splits:
+
+```powershell
+& $projectPython -m local_ai_trader return-baseline data/processed/execution_splits/coinbase_BTC-USD_300s_1778284800_1790640000_h6_l1
+& $projectPython -m local_ai_trader return-baseline data/processed/execution_splits/coinbase_ETH-USD_300s_1778284800_1790640000_h6_l1
+```
+
+- **Mean:** the arithmetic mean of training `execution_target_return`, repeated
+  for every prediction. It is a control for changing market drift.
+- **Ridge:** `StandardScaler` fitted on training rows alone, followed by a
+  regularized linear return regressor with intercept and deterministic SVD.
+  The separate `[return_forecast]` table sets `ridge_alpha = 1.0`. It does not
+  change the frozen classifier Settings or old walk-forward protocols.
+
+Both use only the eight feature names. The supervised target is the fractional
+gross reference-price return from delayed entry open to fixed-horizon exit open;
+fees, spread and slippage remain the decision layer's cost conversion. The
+regressor runs on CPU, needs no new dependencies, and is a starting comparison
+before more complex return models.
+
+For each prepared 143-day dataset, **24,690 training rows** fit the model and
+scaler; **8,225 validation rows** assess them. The trainer verifies manifest
+semantics, per-partition hashes, strict eight-bar purges, timed labels and
+reference-price returns. It opens/hashes only `split.json`, `train.parquet` and
+`validation.parquet`. The reserved `test.parquet` and full upstream candle,
+target and feature datasets remain unopened. Do not invoke the dataset-preparation
+loaders from a fitting phase: those loaders reconstruct entire historical sources.
+
+The console reports validation MAE, RMSE, R-squared, mean error, mean forecast and
+mean observed return. These are **fractions**: `0.001` is `0.1%`. Lower MAE/RMSE is
+better; negative R-squared means the validation outcomes' own mean would have
+lower squared error. That validation mean is only an explanatory metric baseline,
+not a forecast available in advance. R-squared is `null` for constant outcomes.
+Overlapping labels are not independent observations, and these error metrics
+do not establish profitability, trade confidence or strategy performance.
+
+An atomic immutable `data/models/return_baseline_<symbol>_<UTC>_<id>/` contains:
+
+- `checkpoint.json`: training mean, exact scaler statistics, Ridge weights,
+  market/timing basis, training label availability and input provenance;
+- `metrics.json`: training diagnostics and validation errors; test unevaluated;
+- `validation_mean.parquet` and `validation_ridge.parquet`: aligned point
+  forecasts and historical outcomes, with fixed-cost net diagnostics;
+- `experiment.json`: settings, model parameters, package versions, input hashes
+  and a hash for every model/metric/prediction artifact.
+
+JSON checkpoint inference uses saved weights and scaling, with no refitting or
+pickle loading. Structured `ReturnForecast` packets carry the symbol, signal
+time, interval, latency, holding horizon and `execution_open_to_open` basis
+required by the cost-aware policy. Packets cannot precede or equal the last known
+training label. Unconstrained Ridge outputs below `-1` are counted as invalid in
+diagnostics and refused as forecast packets; predictions are never clipped.
+These point forecasts supply no uncertainty interval or correctness probability.
+
+This command does not change the existing historical decision previews, select a
+trading threshold, backtest a new policy, or submit orders. A saved return model
+still needs assessment and an explicit integration into inference and the
+separate paper risk coordinator. No fresh independent strategy period is claimed.
+
 ## Next milestones
 
 1. Compare naive, logistic, XGBoost and MLP validation results on the predefined

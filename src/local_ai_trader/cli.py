@@ -119,6 +119,9 @@ def main(argv: list[str] | None = None) -> int:
     execution_split = commands.add_parser("execution-split", help="Create chronological return partitions purged by execution label availability")
     execution_split.add_argument("path", type=Path, help="Directory containing features.parquet and features.json")
     execution_split.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    return_baseline = commands.add_parser("return-baseline", help="Fit training-mean and scaled Ridge return forecasts; assess validation only")
+    return_baseline.add_argument("path", type=Path, help="Directory containing execution splits and split.json")
+    return_baseline.add_argument("--config", type=Path, default=Path("config/settings.toml"))
     features = commands.add_parser("features", help="Build trailing features from a labelled dataset")
     features.add_argument("path", type=Path, help="Labelled target Parquet file")
     features.add_argument("--config", type=Path, default=Path("config/settings.toml"))
@@ -195,6 +198,11 @@ def main(argv: list[str] | None = None) -> int:
             create_execution_split_dataset(arguments.path, load_settings(arguments.config))
         elif arguments.command == "baseline":
             train_baseline_experiment(arguments.path, load_settings(arguments.config))
+        elif arguments.command == "return-baseline":
+            from local_ai_trader.forecast.baseline import load_return_ridge_alpha
+            from local_ai_trader.forecast.train import train_return_baseline_experiment
+
+            train_return_baseline_experiment(arguments.path, load_settings(arguments.config), load_return_ridge_alpha(arguments.config))
         elif arguments.command == "boosting":
             from local_ai_trader.models.boosting import train_boosting_experiment
 

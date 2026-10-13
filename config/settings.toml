@@ -78,6 +78,10 @@ validation_days = 14
 evaluation_days = 14
 step_days = 14
 
+[return_forecast]
+# Separate from frozen classifier Settings; fixed starting regression baseline.
+ridge_alpha = 1.0
+
 [decision]
 # Starting rules for the future cost-aware paper policy, not optimized thresholds.
 # Existing frozen backtests continue using their recorded [backtest] rules.
