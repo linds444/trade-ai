@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from local_ai_trader import cli
+from local_ai_trader.data.storage import native_path
 from local_ai_trader.features.build_features import build_features, FEATURE_COLUMNS
 from local_ai_trader.forecast import features, targets
 from local_ai_trader.models.train import file_digest
@@ -110,7 +111,7 @@ def test_audited_bundle_is_unchanged_by_feature_publication(bundle):
     labelled, metadata, inputs = targets.load_execution_target_bundle(directory)
     assert len(labelled) == 72
     assert metadata["labelled_rows"] == 72
-    assert inputs == {path: file_digest(path) for path in originals}
+    assert inputs == {native_path(path.resolve()): file_digest(path) for path in originals}
     output, report = features.create_execution_feature_dataset(directory, settings)
     result = pd.read_parquet(output / "features.parquet")
     assert len(result) == 60
@@ -242,8 +243,6 @@ def test_cli_supports_long_paths_without_registry_opt_in(bundle):
     _, _, settings, config = bundle
     # Force nested source/output paths beyond the Windows 260-character limit.
     # Native paths keep mkdir, Arrow, hashing and directory renames consistent.
-    from local_ai_trader.data.storage import native_path
-
     root = native_path(settings.processed_dir / ("deep-folder-" * 16) / ("more-folders-" * 12))
     root.mkdir(parents=True)
     source = root / "long_candles.parquet"
