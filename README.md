@@ -945,6 +945,46 @@ timing, and feature parameters. Current fee changes do not rewrite old diagnosti
 net labels. No source artifact is modified, and reruns cannot overwrite output.
 This stage does not train a return model or measure strategy performance.
 
+## Chronological execution-return splits
+
+Create separate regression partitions from an audited execution feature bundle:
+
+```powershell
+& $projectPython -m local_ai_trader execution-split data/processed/execution_features/coinbase_BTC-USD_300s_1778284800_1790640000_h6_l1
+& $projectPython -m local_ai_trader execution-split data/processed/execution_features/coinbase_ETH-USD_300s_1778284800_1790640000_h6_l1
+```
+
+The command verifies all upstream hashes and reconstructs features and labels
+before partitioning. It preserves the chronological order and feature values,
+using the configured 60%/20%/20% cut positions. No scaling or model fitting occurs.
+Retain a training or validation row only if `execution_target_available_at` is
+**strictly before** the next partition's first prediction time. The default
+execution labels require **eight purged rows at each boundary**, including the
+row whose label becomes known exactly at the boundary. A six-bar classifier
+purge would leak two extra rows of outcomes into each earlier partition.
+
+For each verified **41,164-row** source, the default partitions contain:
+
+| Partition | Raw rows | Purged rows | Retained rows |
+| --- | ---: | ---: | ---: |
+| Train | 24,698 | 8 | 24,690 |
+| Validation | 8,233 | 8 | 8,225 |
+| Test | 8,233 | 0 | 8,233 |
+
+Unknown trailing labels were already removed by the target command. Test needs
+no additional end purge, and validation/test features can use older candle
+history. Eventual scaler fitting must use training rows only. The reserved test
+partition has not been scored by a return model or new strategy; these dates
+overlap previous classifier research and are not a fresh final strategy period.
+
+An immutable `data/processed/execution_splits/<feature-bundle-name>/` contains
+`train.parquet`, `validation.parquet`, `test.parquet` and `split.json`. Its manifest
+records all input hashes, each partition's output hash, cut positions, purged
+prediction times, label availability, the feature allowlist and source lineage.
+Publication is atomic, supports long Windows paths and cannot overwrite an
+existing bundle. Existing classifier datasets and experiment protocols are
+unchanged. Return forecasting and train-only preprocessing are the next step.
+
 ## Next milestones
 
 1. Compare naive, logistic, XGBoost and MLP validation results on the predefined

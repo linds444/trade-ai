@@ -1,5 +1,6 @@
 """Causal, explicitly allowlisted features for execution-aligned returns."""
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -12,7 +13,7 @@ from local_ai_trader.data.storage import native_path, write_json, write_parquet
 from local_ai_trader.features.build_features import build_features, FEATURE_COLUMNS, FEATURE_SCHEMA_VERSION
 from local_ai_trader.forecast.targets import CANDLE_COLUMNS, FUTURE_COLUMNS, load_execution_target_bundle, verify_input_hashes
 from local_ai_trader.models.train import file_digest
-from local_ai_trader.settings import Settings
+from local_ai_trader.settings import Settings, positive_integer
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,6 +33,73 @@ def build_execution_features(labelled: pd.DataFrame, candle_seconds: int, moment
     return pd.concat([features, labels], axis=1)
 
 
+def feature_contract(result: pd.DataFrame, target_metadata: dict, candle_seconds: int, momentum_steps: int, rolling_window: int) -> dict:
+    """Shared feature semantics for creation and downstream audit."""
+    warmup = max(momentum_steps, rolling_window)
+    return {
+        "schema_version": 1, "feature_schema_version": FEATURE_SCHEMA_VERSION,
+        "research_only": True, "target_kind": "execution_open_to_open",
+        "target_metadata": target_metadata,
+        "symbol": target_metadata["symbol"], "exchange": target_metadata["exchange"],
+        "source_rows": len(result) + warmup, "feature_rows": len(result),
+        "warmup_rows_removed": warmup,
+        "candle_seconds": candle_seconds, "momentum_steps": momentum_steps,
+        "rolling_window": rolling_window, "volatility_ddof": 0,
+        "feature_names": list(FEATURE_COLUMNS), "future_only_columns": list(FUTURE_COLUMNS),
+        "regression_target_column": "execution_target_return",
+        "target_available_column": "execution_target_available_at",
+        "target_known_offset_from_prediction_bars": target_metadata["target_known_offset_from_prediction_bars"],
+        "prediction_time": "available_at", "normalization": "none; eventual scaling must fit training rows only",
+        "zero_volume_window_ratio": 0.0, "zero_width_close_location": 0.5,
+        "first_prediction_time": result.available_at.iloc[0].isoformat(),
+        "last_prediction_time": result.available_at.iloc[-1].isoformat(),
+        "last_label_known_at": result.execution_target_available_at.iloc[-1].isoformat(),
+        "models_fitted": False, "strategy_performance_evaluated": False,
+    }
+
+
+def load_execution_feature_bundle(directory: Path) -> tuple[pd.DataFrame, dict, dict[Path, str]]:
+    """Verify upstream targets, reconstruct causal features, and audit metadata.
+
+    This is dataset preparation; do not invoke it inside a fitting/evaluation
+    phase that must leave its held-out partition unopened.
+    """
+    directory = native_path(directory.resolve())
+    metadata_path, features_path = directory / "features.json", directory / "features.parquet"
+    if not metadata_path.is_file() or not features_path.is_file():
+        raise ValueError("Execution feature bundle requires features.json and features.parquet")
+    metadata_digest = file_digest(metadata_path)
+    with metadata_path.open(encoding="utf-8") as stream:
+        metadata = json.load(stream)
+    if not isinstance(metadata, dict) or type(metadata.get("schema_version")) is not int or metadata["schema_version"] != 1:
+        raise ValueError("Unsupported execution feature metadata")
+    for name in ("candle_seconds", "momentum_steps", "rolling_window"):
+        positive_integer(metadata.get(name), name)
+    target_path = metadata.get("target_bundle_path")
+    if not isinstance(target_path, str) or not Path(target_path).is_absolute():
+        raise ValueError("Execution feature metadata requires an absolute target bundle path")
+    own_inputs = {metadata_path: metadata_digest, features_path: metadata.get("features_sha256")}
+    verify_input_hashes(own_inputs)
+    labelled, target_metadata, inputs = load_execution_target_bundle(Path(target_path))
+    if metadata.get("input_hashes") != {str(path): digest for path, digest in inputs.items()}:
+        raise ValueError("Execution feature upstream input hashes disagree")
+    if metadata["candle_seconds"] != target_metadata["candle_seconds"]:
+        raise ValueError("Execution feature candle interval disagrees with targets")
+    expected = build_execution_features(labelled, metadata["candle_seconds"], metadata["momentum_steps"], metadata["rolling_window"])
+    for name, value in feature_contract(expected, target_metadata, metadata["candle_seconds"], metadata["momentum_steps"], metadata["rolling_window"]).items():
+        actual = metadata.get(name)
+        if actual != value or (type(value) in (bool, int) and type(actual) is not type(value)):
+            raise ValueError(f"Execution feature metadata disagrees on {name}")
+    frame = pd.read_parquet(features_path)
+    try:
+        pd.testing.assert_frame_equal(frame, expected, check_exact=True)
+    except AssertionError as error:
+        raise ValueError("Execution features disagree with their causal candle source") from error
+    inputs.update(own_inputs)
+    verify_input_hashes(inputs)
+    return frame, metadata, inputs
+
+
 def create_execution_feature_dataset(directory: Path, settings: Settings) -> tuple[Path, dict]:
     """Audit the target bundle and atomically publish immutable feature data."""
     directory = native_path(directory.resolve())
@@ -49,26 +117,9 @@ def create_execution_feature_dataset(directory: Path, settings: Settings) -> tup
         raise ValueError("Execution feature symbol is not enabled in the current market configuration")
     result = build_execution_features(labelled, settings.candle_seconds, settings.momentum_steps, settings.rolling_window)
     report = {
-        "schema_version": 1, "feature_schema_version": FEATURE_SCHEMA_VERSION,
-        "created_at": pd.Timestamp.now(tz="UTC").isoformat(),
-        "research_only": True, "target_kind": "execution_open_to_open",
-        "target_bundle_path": str(directory), "target_metadata": target_metadata,
+        **feature_contract(result, target_metadata, settings.candle_seconds, settings.momentum_steps, settings.rolling_window),
+        "created_at": pd.Timestamp.now(tz="UTC").isoformat(), "target_bundle_path": str(directory),
         "input_hashes": {str(path): digest for path, digest in inputs.items()},
-        "symbol": target_metadata["symbol"], "exchange": target_metadata["exchange"],
-        "source_rows": len(labelled), "feature_rows": len(result),
-        "warmup_rows_removed": max(settings.momentum_steps, settings.rolling_window),
-        "candle_seconds": settings.candle_seconds, "momentum_steps": settings.momentum_steps,
-        "rolling_window": settings.rolling_window, "volatility_ddof": 0,
-        "feature_names": list(FEATURE_COLUMNS), "future_only_columns": list(FUTURE_COLUMNS),
-        "regression_target_column": "execution_target_return",
-        "target_available_column": "execution_target_available_at",
-        "target_known_offset_from_prediction_bars": target_metadata["target_known_offset_from_prediction_bars"],
-        "prediction_time": "available_at", "normalization": "none; eventual scaling must fit training rows only",
-        "zero_volume_window_ratio": 0.0, "zero_width_close_location": 0.5,
-        "first_prediction_time": result.available_at.iloc[0].isoformat(),
-        "last_prediction_time": result.available_at.iloc[-1].isoformat(),
-        "last_label_known_at": result.execution_target_available_at.iloc[-1].isoformat(),
-        "models_fitted": False, "strategy_performance_evaluated": False,
     }
     verify_input_hashes(inputs)
     output.parent.mkdir(parents=True, exist_ok=True)

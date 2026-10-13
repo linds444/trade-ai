@@ -116,6 +116,9 @@ def main(argv: list[str] | None = None) -> int:
     execution_features = commands.add_parser("execution-features", help="Build causal features from an audited execution target bundle")
     execution_features.add_argument("path", type=Path, help="Directory containing labels.parquet and targets.json")
     execution_features.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    execution_split = commands.add_parser("execution-split", help="Create chronological return partitions purged by execution label availability")
+    execution_split.add_argument("path", type=Path, help="Directory containing features.parquet and features.json")
+    execution_split.add_argument("--config", type=Path, default=Path("config/settings.toml"))
     features = commands.add_parser("features", help="Build trailing features from a labelled dataset")
     features.add_argument("path", type=Path, help="Labelled target Parquet file")
     features.add_argument("--config", type=Path, default=Path("config/settings.toml"))
@@ -186,6 +189,10 @@ def main(argv: list[str] | None = None) -> int:
             create_execution_feature_dataset(arguments.path, load_settings(arguments.config))
         elif arguments.command == "split":
             create_split_dataset(arguments.path, load_settings(arguments.config))
+        elif arguments.command == "execution-split":
+            from local_ai_trader.forecast.split import create_execution_split_dataset
+
+            create_execution_split_dataset(arguments.path, load_settings(arguments.config))
         elif arguments.command == "baseline":
             train_baseline_experiment(arguments.path, load_settings(arguments.config))
         elif arguments.command == "boosting":
