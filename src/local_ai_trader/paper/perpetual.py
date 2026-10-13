@@ -62,7 +62,7 @@ def _hour(value):
 def _initial(contract):
     return {"wallet_balance": contract["initial_collateral"], "peak_equity": contract["initial_collateral"],
             "day_start_equity": contract["initial_collateral"], "day": contract["created_at"][:10],
-            "as_of": contract["created_at"], "version": 0, "entries_enabled": True,
+            "as_of": contract["created_at"], "version": 0, "entries_enabled": contract.get("initial_entries_enabled", True),
             "positions": {}, "trades": [], "settlements": {}}
 
 
@@ -310,7 +310,8 @@ class PerpetualPaperAccount:
 
     @classmethod
     def create(cls, path, *, coins=tuple(BY_COIN), initial_collateral=10000.0,
-               policy=EntryPolicy(), slippage_bps=1.0, source_mode="synthetic", now=None):
+               policy=EntryPolicy(), slippage_bps=1.0, source_mode="synthetic", now=None,
+               run_binding=None, entries_enabled=True):
         initial_collateral = _number(initial_collateral, positive=True)
         slippage_bps = _number(slippage_bps)
         if not 0 <= slippage_bps < 10000 or source_mode not in ("synthetic", "observed"):
@@ -325,6 +326,14 @@ class PerpetualPaperAccount:
                     "coins": list(coins), "initial_collateral": initial_collateral, "slippage_bps": slippage_bps,
                     "source_mode": source_mode, "created_at": _iso(now), "entry_policy": asdict(policy), "risk": dict(RISK_LIMITS),
                     "funding_time_basis": "exchange_event"}
+        if type(entries_enabled) is not bool:
+            raise ValueError("Initial entry switch must be boolean")
+        if not entries_enabled:
+            contract["initial_entries_enabled"] = False
+        if run_binding is not None:
+            if not isinstance(run_binding, dict) or not run_binding:
+                raise ValueError("Require a nonempty paper run binding")
+            contract["run_binding"] = json.loads(_json(run_binding))
         path = native_path(path).resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("xb"):
@@ -393,13 +402,26 @@ class PerpetualPaperAccount:
                 raise ValueError("Perpetual balances do not match replay")
             return _report(state, contract)
 
+    def status(self):
+        """Read reconciled current values; construction already replay-audits the journal."""
+        with self._transaction() as db:
+            contract, state, _ = self._read(db)
+            return _report(state, contract)
+
+    def contract(self):
+        with self._transaction() as db:
+            contract, _, _ = self._read(db)
+            return deepcopy(contract)
+
     def _persist(self, db, state, event, result, previous, inputs_hash):
         state_hash = _hash(state)
         digest = _hash({"event": event, "result": result, "state_hash": state_hash, "previous_hash": previous})
         db.execute("INSERT INTO events VALUES(?,?,?,?,?,?,?,?)", (state["version"], event["operation_id"], inputs_hash, _json(event), _json(result), state_hash, previous, digest))
         db.execute("UPDATE account SET state=?,state_hash=? WHERE id=1", (_json(state), state_hash))
 
-    def execute(self, operation_id, kind, inputs, *, now=None):
+    def execute(self, operation_id, kind, inputs, *, now=None, clock=None):
+        if now is not None and clock is not None:
+            raise ValueError("Supply either an explicit test time or a running clock")
         if not isinstance(operation_id, str) or not operation_id.strip() or len(operation_id) > 200:
             raise ValueError("Require a bounded stable operation identifier")
         inputs = json.loads(_json(inputs))
@@ -412,12 +434,12 @@ class PerpetualPaperAccount:
                 if old["inputs_hash"] != inputs_hash:
                     raise ValueError("Operation identifier reused with different inputs")
                 return {**json.loads(old["result"]), "replayed": True}
-            at = _utc(now or datetime.now(timezone.utc))
+            at = _utc(clock() if clock is not None else now or datetime.now(timezone.utc))
             event = {"operation_id": operation_id, "kind": kind, "inputs": inputs, "at": _iso(at)}
             state, result = _reduce(state, contract, event)
             previous = _hash(contract) if head is None else head["event_hash"]
             self._persist(db, state, event, result, previous, inputs_hash)
-            commit_at = at if now is not None else datetime.now(timezone.utc)
+            commit_at = _utc(clock()) if clock is not None else at if now is not None else datetime.now(timezone.utc)
             if not 0 <= (commit_at - at).total_seconds() < 5:
                 raise ValueError("Perpetual operation expired before commit")
             for quote in ([inputs["quote"]] if kind in ("entry", "exit") else inputs.get("quotes", [])):

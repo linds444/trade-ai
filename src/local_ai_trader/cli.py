@@ -126,11 +126,12 @@ def main(argv: list[str] | None = None) -> int:
     venue_train = commands.add_parser("hyperliquid-train", help="Fit all-market venue models, calibrate earlier validation and assess later validation; no test reads")
     venue_train.add_argument("path", type=Path, help="Prepared Hyperliquid history directory")
     venue_train.add_argument("--device", choices=("cuda", "cpu"), default="cuda", help="MLP training device; CUDA is explicit and never silently falls back")
-    decisions = commands.add_parser("hyperliquid-decisions", help="Infer live delayed signals and cost-aware entry previews; no account or orders")
+    decisions = commands.add_parser("hyperliquid-decisions", help="Infer delayed live previews; optional forecast tracking and paused paper monitor; no orders")
     decisions.add_argument("--models", type=Path, required=True, help="Saved Hyperliquid model batch directory")
     decisions.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
     decisions.add_argument("--watch", action="store_true", help="Archive one fresh decision preview per five-minute window until Ctrl+C")
     decisions.add_argument("--track-outcomes", action="store_true", help="Record current predictions before future entry, resolve outcomes after 40 minutes; no fills")
+    decisions.add_argument("--paper-monitor", action="store_true", help="Maintain an observed USDC paper book and entry-skip journal; entries paused, no trial or orders")
     perp_demo = commands.add_parser("perpetual-paper-demo", help="Synthetic persisted USDC margin/funding workflow; no strategy or orders")
     perp_demo.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
     perp_status = commands.add_parser("perpetual-paper-status", help="Audit recorded USDC perpetual balances without fetching prices")
@@ -244,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
         elif arguments.command == "hyperliquid-decisions":
             from local_ai_trader.hyperliquid.decisions import run_decision_scanner
 
-            run_decision_scanner(arguments.config, arguments.models, watch=arguments.watch, track_outcomes=arguments.track_outcomes)
+            run_decision_scanner(arguments.config, arguments.models, watch=arguments.watch, track_outcomes=arguments.track_outcomes, paper_monitor=arguments.paper_monitor)
         elif arguments.command == "perpetual-paper-demo":
             from local_ai_trader.paper.perpetual_demo import perpetual_demo
 

@@ -1719,3 +1719,58 @@ reliability, net trading profit or approval to enter. Confidence remains
 unavailable and the **paper-profitability trial has not started**. This option
 collects the genuinely prospective evidence needed for later reliability work;
 it never fits models or opens reserved test partitions.
+
+## Observed paper-book monitor alongside the scanner
+
+Add `--paper-monitor` to the same scanner command to maintain a separate,
+**entry-paused paper account** alongside forecast tracking. Stop only the scanner
+with `Ctrl+C`; keep the funding collector running. A self-contained Windows
+launch, using your actual saved model directory, is:
+
+```powershell
+Set-Location "$env:USERPROFILE\trade-ai"
+$projectPython = @(
+    "$PWD\.venv\Scripts\python.exe"
+    "$PWD\venv\Scripts\python.exe"
+    "$env:USERPROFILE\local-ai-trader\.venv\Scripts\python.exe"
+    "$env:USERPROFILE\local-ai-trader\venv\Scripts\python.exe"
+) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+if (-not $projectPython) { throw "No project Python environment found." }
+& $projectPython -m local_ai_trader hyperliquid-decisions --models "data/hyperliquid/models/models_<UTC>_<id>" --config config/hyperliquid.toml --watch --track-outcomes --paper-monitor
+```
+
+The monitor creates `data/hyperliquid/paper/monitor_<hash>/account.sqlite` with
+**10,000 simulated USDC**, an observed-source contract, the fixed risk/cost policy
+and model/config binding. This balance is fictional paper collateral. Synthetic
+demo accounts and the existing prospective forecast book remain separate.
+The account and run manifest publish together; restart replay-audits the journal
+and resumes that book. A missing account under an existing run is an error rather
+than a balance reset. Model/config changes select a separate monitor book.
+
+Each new five-minute scanner observation rechecks raw books and received mark
+contexts before writes. Contract prices, quantity precision and venue fees must
+agree with archived evidence, preserving native `kPEPE` units. The account stores
+marks and immutable source decisions with preview hashes; each observation
+receipt includes the independent signal-gate result, execution skip, reconciled
+account values and a checksum. Duplicate previews preserve the first receipt and
+never add another mark event. A crash after account commit but before receipt
+publication reuses the original operation. A running clock rechecks the
+five-second operation deadline and quote freshness before transaction commit.
+
+The monitor **never calls entry execution**, even if a supplied signal passes
+the gate. An entry switch changed externally is paused again. Missing reliability
+continues to route otherwise eligible BUY signals to review; AVOID decisions
+stay blocked. No review notification is sent externally. Venue margin/liquidation
+integration and independently validated reliability remain before enabling a
+strategy trial. Zero fills, a flat paper balance and elapsed monitoring days do
+not establish profitability or start the required month.
+
+Maintenance can mark existing holdings, close due holdings against a current
+quote at or after their actual deadline, and post accounting-ready recorded
+funding through the existing audited archive adapter. Reducing exits precede
+funding archive work, so unavailable or corrupt funding evidence cannot trap a
+holding. Missing funding stays provisional; no historical oracle or fill price
+is invented. This runs once per scanner window and depends on successful scanner
+captures; it is not yet a continuous risk/liquidation engine. The monitor runs
+before potentially slower prospective outcome resolution. Live execution stays
+disabled, and no exchange trading credentials are needed.

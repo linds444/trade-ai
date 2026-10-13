@@ -168,7 +168,7 @@ def create_decision_preview(client, config_path, model_directory, *, track_outco
     return output, report
 
 
-def run_decision_scanner(config_path, model_directory, *, watch=False, track_outcomes=False):
+def run_decision_scanner(config_path, model_directory, *, watch=False, track_outcomes=False, paper_monitor=False):
     settings = load_hyperliquid_settings(config_path)
     client = HyperliquidPublicClient(settings)
     last_boundary = None
@@ -180,6 +180,9 @@ def run_decision_scanner(config_path, model_directory, *, watch=False, track_out
                 continue
             try:
                 output, report = create_decision_preview(client, config_path, model_directory, track_outcomes=track_outcomes)
+                if paper_monitor:
+                    from local_ai_trader.hyperliquid.paper_monitor import monitor_preview
+                    monitor_preview(client, output, report)
                 if track_outcomes:
                     from local_ai_trader.hyperliquid.forward import track_preview
                     track_preview(client, output, report)

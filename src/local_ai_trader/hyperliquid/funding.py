@@ -175,7 +175,7 @@ def pair_recorded_funding(root, required_keys=None, *, extra_paths=()):
     return ready, unavailable
 
 
-def apply_recorded_funding(account_path, archive_root, *, now=None):
+def apply_recorded_funding(account_path, archive_root, *, now=None, clock=None):
     """Future coordinator adapter; this function never opens or closes positions."""
     account = PerpetualPaperAccount(account_path)
     report = account.audit()
@@ -187,12 +187,12 @@ def apply_recorded_funding(account_path, archive_root, *, now=None):
     results = []
     for key in report["missing_funding"]:
         if key in ready:
-            results.append(account.execute("recorded-funding:" + key, "funding", ready[key], now=now))
+            results.append(account.execute("recorded-funding:" + key, "funding", ready[key], now=now, clock=clock))
     return results, account.audit()
 
 
 @contextmanager
-def _publication_lock(root):
+def _publication_lock(root, *, label="funding collector"):
     # OS locks are released on process death; the marker file is retained so
     # unlocking cannot race with a new publisher opening another inode.
     with (root / ".publication.lock").open("a+b") as stream:
@@ -208,7 +208,7 @@ def _publication_lock(root):
                 import fcntl
                 fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as error:
-            raise ValueError("Another funding collector is publishing; retry") from error
+            raise ValueError(f"Another {label} is publishing; retry") from error
         try:
             yield
         finally:
