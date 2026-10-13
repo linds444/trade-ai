@@ -21,7 +21,10 @@ import pandas as pd
 from local_ai_trader.data.clean import clean_candles
 from local_ai_trader.data.storage import native_path, write_json, write_parquet
 from local_ai_trader.features.build_features import FEATURE_COLUMNS, build_features
+from local_ai_trader.hyperliquid.markets import BY_COIN
+from local_ai_trader.markets.source import live_market_state
 from local_ai_trader.models.train import file_digest
+from local_ai_trader.risk.entry_policy import EntryPolicy
 from local_ai_trader.risk.paper import _utc
 from local_ai_trader.settings import positive_integer
 
@@ -44,6 +47,7 @@ class HyperliquidSettings:
     taker_fee_bps: float = 4.5
     minimum_forward_days: int = 30
     observations: Path = Path("data/hyperliquid/live")
+    entry_policy: EntryPolicy = EntryPolicy()
 
 
 def load_hyperliquid_settings(path: Path) -> HyperliquidSettings:
@@ -55,6 +59,7 @@ def load_hyperliquid_settings(path: Path) -> HyperliquidSettings:
         "features": {"momentum_steps", "rolling_window"},
         "feed": {"history_bars", "maximum_book_age_seconds", "poll_seconds", "timeout_seconds", "max_attempts"},
         "paper": {"taker_fee_bps", "minimum_forward_days", "live_execution_enabled"},
+        "gate": {"minimum_probability", "minimum_confidence", "maximum_positions"},
         "paths": {"observations"},
     }
     if set(values) != set(expected) or any(not isinstance(values[name], dict) or set(values[name]) != keys for name, keys in expected.items()):
@@ -66,8 +71,8 @@ def load_hyperliquid_settings(path: Path) -> HyperliquidSettings:
     if type(market["leverage"]) is not int or market["leverage"] != 1 or market["long_only"] is not True or type(market["prediction_horizon_minutes"]) is not int or market["prediction_horizon_minutes"] != 30:
         raise ValueError("Hyperliquid paper setup requires 1×, long-only, 30-minute predictions")
     coins = market["coins"]
-    if not isinstance(coins, list) or not coins or not all(isinstance(coin, str) and coin in ("BTC", "ETH") for coin in coins) or len(set(coins)) != len(coins):
-        raise ValueError("Hyperliquid coins must be unique BTC/ETH perpetual identifiers")
+    if not isinstance(coins, list) or not coins or not all(isinstance(coin, str) and coin in BY_COIN for coin in coins) or len(set(coins)) != len(coins):
+        raise ValueError("Hyperliquid coins must be unique registered perpetual identifiers")
     if values["paper"]["live_execution_enabled"] is not False:
         raise ValueError("Live execution is unavailable in the paper data integration")
     parameters = {**values["features"], **values["feed"], **{name: values["paper"][name] for name in ("taker_fee_bps", "minimum_forward_days")}}
@@ -87,7 +92,7 @@ def load_hyperliquid_settings(path: Path) -> HyperliquidSettings:
     output = Path(output)
     if not output.is_absolute():
         output = path.parent.parent / output
-    return HyperliquidSettings(coins=tuple(coins), observations=native_path(output).resolve(), **parameters)
+    return HyperliquidSettings(coins=tuple(coins), observations=native_path(output).resolve(), entry_policy=EntryPolicy(**values["gate"]), **parameters)
 
 
 def _float(value, *, positive=False):
@@ -154,8 +159,21 @@ def parse_contexts(payload: list, coins: tuple[str, ...], received_at: datetime)
                        "hourly_funding_rate": funding, "size_decimals": asset["szDecimals"], "exchange_max_leverage": asset["maxLeverage"],
                        "only_isolated": asset.get("onlyIsolated", False), "context_received_at": _utc(received_at).isoformat(),
                        "context_exchange_time": None}
+        if "prevDayPx" in context:
+            found[coin]["previous_day_price"] = _float(context["prevDayPx"], positive=True)
+        if "dayNtlVlm" in context:
+            volume = _float(context["dayNtlVlm"])
+            if volume < 0:
+                raise ValueError("Negative daily notional volume")
+            found[coin]["day_notional_volume"] = volume
+        if BY_COIN[coin].dex:
+            scale = _float(asset.get("deployerFeeScale"))
+            growth = asset.get("growthMode")
+            if not 0 <= scale <= 3 or growth not in ("enabled", "disabled"):
+                raise ValueError("Unknown HIP-3 deployer fee configuration")
+            found[coin].update(deployer_fee_scale=scale, growth_mode=growth)
     if set(found) != set(coins):
-        raise ValueError("Configured BTC/ETH perpetual metadata is missing")
+        raise ValueError(f"Configured perpetual metadata is missing: {sorted(set(coins) - set(found))}")
     return found
 
 
@@ -191,9 +209,11 @@ class HyperliquidPublicClient:
         if not isinstance(payload, dict) or payload.get("type") not in READ_TYPES:
             raise ValueError("Only allowlisted public Hyperliquid information requests are supported")
         kind = payload["type"]
-        expected = {"metaAndAssetCtxs": {"type"}, "l2Book": {"type", "coin"}, "candleSnapshot": {"type", "req"}}
+        expected = {"metaAndAssetCtxs": {"type", "dex"} if "dex" in payload else {"type"}, "l2Book": {"type", "coin"}, "candleSnapshot": {"type", "req"}}
         if kind in expected and set(payload) != expected[kind]:
             raise ValueError("Unexpected fields in public Hyperliquid request")
+        if kind == "metaAndAssetCtxs" and "dex" in payload and payload["dex"] not in {BY_COIN[coin].dex for coin in self.settings.coins if BY_COIN[coin].dex}:
+            raise ValueError("Unconfigured Hyperliquid perpetual DEX")
         if kind == "fundingHistory" and not {"type", "coin", "startTime"} <= set(payload) <= {"type", "coin", "startTime", "endTime"}:
             raise ValueError("Unexpected funding history fields")
         if kind in ("l2Book", "fundingHistory") and payload["coin"] not in self.settings.coins:
@@ -226,8 +246,8 @@ class HyperliquidPublicClient:
                 time.sleep(2 ** attempt)
         raise RuntimeError("Hyperliquid public API retries exhausted") from last_error
 
-    def _contexts(self):
-        payload = self.info({"type": "metaAndAssetCtxs"})
+    def _contexts(self, dex=""):
+        payload = self.info({"type": "metaAndAssetCtxs", **({"dex": dex} if dex else {})})
         return payload, _utc(self.clock())
 
     def snapshot(self):
@@ -236,15 +256,18 @@ class HyperliquidPublicClient:
             end = int(now.timestamp()) // SECONDS * SECONDS
             start = end - self.settings.history_bars * SECONDS
             raw = {}
-            with ThreadPoolExecutor(max_workers=1 + 2 * len(self.settings.coins)) as pool:
-                jobs = {"contexts": pool.submit(self._contexts)}
+            dex_coins = {}
+            for coin in self.settings.coins:
+                dex_coins.setdefault(BY_COIN[coin].dex, []).append(coin)
+            context_receipts = {}
+            with ThreadPoolExecutor(max_workers=min(8, len(dex_coins) + 2 * len(self.settings.coins))) as pool:
+                jobs = {(f"{dex}_contexts" if dex else "contexts"): pool.submit(self._contexts, dex) for dex in dex_coins}
                 for coin in self.settings.coins:
                     jobs[f"{coin}_book"] = pool.submit(self.info, {"type": "l2Book", "coin": coin})
                     jobs[f"{coin}_candles"] = pool.submit(self.info, {"type": "candleSnapshot", "req": {"coin": coin, "interval": "5m", "startTime": start * 1000, "endTime": end * 1000}})
-                contexts_received_at = None
                 for name, job in jobs.items():
-                    if name == "contexts":
-                        raw[name], contexts_received_at = job.result()
+                    if name == "contexts" or name.endswith("_contexts"):
+                        raw[name], context_receipts[name] = job.result()
                     else:
                         raw[name] = job.result()
             now = _utc(self.clock())
@@ -252,7 +275,15 @@ class HyperliquidPublicClient:
                 if boundary_attempt == 0:
                     continue
                 raise ValueError("Candle boundary advanced while fetching Hyperliquid data")
-            contexts = parse_contexts(raw["contexts"], self.settings.coins, contexts_received_at)
+            contexts = {}
+            for dex, coins in dex_coins.items():
+                key = f"{dex}_contexts" if dex else "contexts"
+                metadata = raw[key]
+                # Token index zero is USDC on Hyperliquid. Refuse a venue
+                # collateral change instead of treating a USDH account as USDC.
+                if not isinstance(metadata, list) or not metadata or not isinstance(metadata[0], dict) or type(metadata[0].get("collateralToken")) is not int or metadata[0]["collateralToken"] != 0:
+                    raise ValueError("Configured perpetual DEX collateral is not verified USDC")
+                contexts.update(parse_contexts(metadata, tuple(coins), context_receipts[key]))
             assets, frames, feature_frames = {}, {}, {}
             for coin in self.settings.coins:
                 book = parse_book(raw[f"{coin}_book"], coin, now, self.settings.maximum_book_age_seconds)
@@ -262,12 +293,25 @@ class HyperliquidPublicClient:
                     raise ValueError("Latest Hyperliquid completed candle is stale")
                 assets[coin] = {**contexts[coin], "book": book, "quality": asdict(quality), "last_prediction_time": features.available_at.iloc[-1].isoformat(),
                                 "feature_rows": len(features), "latest_features": {name: float(features[name].iloc[-1]) for name in FEATURE_COLUMNS}}
+                market = BY_COIN[coin]
+                assets[coin]["market_state"] = asdict(live_market_state(market, contexts[coin], book, assets[coin]["latest_features"]))
+                assets[coin]["contract_identifier"] = coin
+                assets[coin]["underlying_units_per_contract"] = market.underlying_units_per_contract
+                if market.dex:
+                    scale = contexts[coin]["deployer_fee_scale"]
+                    multiplier = (1 + scale) if scale < 1 else 2 * scale
+                    multiplier *= 0.1 if contexts[coin]["growth_mode"] == "enabled" else 1
+                else:
+                    multiplier = 1
+                assets[coin]["taker_fee_bps_assumption"] = self.settings.taker_fee_bps * multiplier
                 frames[coin], feature_frames[coin] = frame, features
-            report = {"schema_version": 1, "mode": "public_mainnet_data_only", "exchange": "hyperliquid", "instrument": "perpetual", "collateral_currency": "USDC",
+            report = {"schema_version": 2, "mode": "public_mainnet_data_only", "exchange": "hyperliquid", "instrument": "perpetual", "collateral_currency": "USDC",
                       "configured_leverage": 1, "long_only": True, "created_at": now.isoformat(), "candle_seconds": SECONDS, "prediction_horizon_minutes": 30,
                       "assets": assets, "features": list(FEATURE_COLUMNS), "taker_fee_bps_assumption": self.settings.taker_fee_bps,
                       "minimum_forward_paper_days": self.settings.minimum_forward_days, "forward_strategy_started": False,
                       "live_execution_enabled": False, "orders_created": False, "paper_fills_created": False,
+                      "entry_policy": asdict(self.settings.entry_policy), "signal_gate_connected": False,
+                      "fee_note": "Base-tier assumption without account discounts; HIP-3 deployer and growth multipliers applied per contract",
                       "context_time_note": "Asset context has no exchange timestamp; reception is recorded separately from exchange-timestamped books",
                       "funding_note": "Current hourly rate; not guaranteed future funding. Payments use position size * oracle price * actual hourly rate."}
             return report, raw, frames, feature_frames
@@ -285,8 +329,9 @@ def save_hyperliquid_snapshot(client: HyperliquidPublicClient, config_path: Path
     try:
         write_json(staging / "raw.json", raw)
         for coin in client.settings.coins:
-            write_parquet(staging / f"{coin}_candles.parquet", candles[coin])
-            write_parquet(staging / f"{coin}_features.parquet", features[coin])
+            filename = BY_COIN[coin].filename
+            write_parquet(staging / f"{filename}_candles.parquet", candles[coin])
+            write_parquet(staging / f"{filename}_features.parquet", features[coin])
         report["input_config_sha256"] = config_hash
         report["artifact_hashes"] = {path.name: file_digest(path) for path in staging.iterdir() if path.is_file()}
         write_json(staging / "snapshot.json", report)
@@ -304,7 +349,8 @@ def save_hyperliquid_snapshot(client: HyperliquidPublicClient, config_path: Path
     print(f"Hyperliquid mainnet feed: {'/'.join(client.settings.coins)} perpetuals; USDC; configured 1×, long only")
     for coin, asset in report["assets"].items():
         book = asset["book"]
-        print(f"{coin}: bid {book['bid']:.2f}; ask {book['ask']:.2f}; mark {asset['mark_price']:.2f}; oracle {asset['oracle_price']:.2f}; hourly funding {100 * asset['hourly_funding_rate']:.6f}%")
+        state = asset["market_state"]
+        print(f"{state['symbol']} ({coin}): display price {state['price']:.10g}; contract bid {book['bid']:.10g}; ask {book['ask']:.10g}; hourly funding {100 * asset['hourly_funding_rate']:.6f}%; taker assumption {asset['taker_fee_bps_assumption']:.3f} bps")
         print(f"  Completed candles: {asset['quality']['cleaned_rows']}; missing: 0; feature rows: {asset['feature_rows']}; latest candle available: {asset['last_prediction_time']}")
     print("PASS: live books are fresh; completed candles and causal features validated")
     print("Data-only setup: no paper fills; forward strategy month has not started; live execution disabled")

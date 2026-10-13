@@ -2,7 +2,7 @@
 # Public mainnet observations; all execution remains local paper simulation.
 exchange = "hyperliquid"
 instrument = "perpetual"
-coins = ["BTC", "ETH"]
+coins = ["xyz:HOOD", "xyz:NVDA", "SOL", "ETH", "xyz:TSLA", "BTC", "kPEPE", "DOGE"]
 collateral_currency = "USDC"
 leverage = 1
 long_only = true
@@ -25,6 +25,11 @@ max_attempts = 3
 taker_fee_bps = 4.5
 minimum_forward_days = 30
 live_execution_enabled = false
+
+[gate]
+minimum_probability = 0.60
+minimum_confidence = 0.70
+maximum_positions = 5
 
 [paths]
 observations = "data/hyperliquid/live"

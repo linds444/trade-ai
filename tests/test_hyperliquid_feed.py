@@ -27,7 +27,7 @@ def book(coin="BTC", now=NOW):
 
 
 def contexts():
-    return [{"universe": [{"name": "BTC", "szDecimals": 5, "maxLeverage": 40}, {"name": "ETH", "szDecimals": 4, "maxLeverage": 25}]},
+    return [{"collateralToken": 0, "universe": [{"name": "BTC", "szDecimals": 5, "maxLeverage": 40}, {"name": "ETH", "szDecimals": 4, "maxLeverage": 25}]},
             [{"markPx": "100.5", "oraclePx": "100.7", "funding": "0.0000125"}, {"markPx": "101.5", "oraclePx": "101.7", "funding": "-0.0001"}]]
 
 
@@ -41,7 +41,8 @@ def candles(coin="BTC", start=START, end=END):
 def config(tmp_path):
     path = tmp_path / "config/hyperliquid.toml"
     path.parent.mkdir()
-    path.write_text((ROOT / "config/hyperliquid.toml").read_text(encoding="utf-8"), encoding="utf-8")
+    text = (ROOT / "config/hyperliquid.toml").read_text(encoding="utf-8")
+    path.write_text(text.replace('coins = ["xyz:HOOD", "xyz:NVDA", "SOL", "ETH", "xyz:TSLA", "BTC", "kPEPE", "DOGE"]', 'coins = ["BTC", "ETH"]'), encoding="utf-8")
     return path
 
 

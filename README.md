@@ -5,7 +5,7 @@ Research includes causal features and purged splits, calibrated classifier and
 return baselines, walk-forward cost accounting, decision/risk checks and a
 persistent spot-paper execution foundation.
 
-The current deployment target is **Hyperliquid BTC/ETH perpetuals, 1× leverage,
+The current deployment target is **eight Hyperliquid perpetuals, 1× leverage,
 long only**. Its public mainnet data feed validates and archives live observations
 without a wallet key. Funding-aware USDC paper accounting and venue-bound models
 are the next integration steps. Live execution is disabled.
@@ -1229,6 +1229,45 @@ and a minimum 30-day forward paper period. No referral, volume or staking discou
 is assumed. This configuration has no wallet, private key or signing settings;
 `live_execution_enabled` must remain false.
 
+| Scanner symbol | Hyperliquid contract | Contract unit |
+| --- | --- | --- |
+| HOOD | `xyz:HOOD` | 1 underlying unit |
+| NVDA | `xyz:NVDA` | 1 underlying unit |
+| SOL/USD | `SOL` | 1 SOL |
+| ETH/USD | `ETH` | 1 ETH |
+| TSLA | `xyz:TSLA` | 1 underlying unit |
+| BTC/USD | `BTC` | 1 BTC |
+| PEPE/USD | `kPEPE` | **1,000 PEPE** |
+| DOGE/USD | `DOGE` | 1 DOGE |
+
+HOOD/NVDA/TSLA are HIP-3 equity perpetuals, not ownership of shares. Their `xyz`
+metadata is fetched separately from validator-operated crypto perpetuals. Both
+venues must report USDC collateral (token index zero); a change refuses the
+observation. Display symbols retain the requested `/USD` labels, while settlement
+is explicitly USDC. PEPE display prices divide contract prices by 1,000; candles,
+model features, execution quantities and funding remain in **contract units**.
+Daily quote notional is never multiplied by that conversion. HIP-3 deployer fee
+scale and growth mode adjust the base fee assumption separately per contract;
+currently the three configured equity perpetuals imply 0.9 bps per side before
+account discounts. Fee settings are read again each observation.
+
+The intended flow is **Source → Decision → Gate → Paper**. `MarketState` supplies
+the same fields for live observations and a seeded, explicitly synthetic offline
+universe: price, fractional 24h change, quote notional volume, causal momentum,
+news and regime. Live news/regime are unavailable until their sources/models are
+connected; generated data is never a fallback for a failed live feed.
+
+The separate signal policy defaults to **60% calibrated probability, 70% validated
+confidence and five occupied positions**, counting pending entry reservations.
+`evaluate_entry_signal` names every rule, returning BLOCK or REVIEW when evidence
+is missing/low. Confidence needs a separate validated reliability measure; model
+probability and entropy are not relabeled as confidence. Passing this gate only
+makes a candidate eligible for independent account risk authorization. HOLD,
+AVOID and SELL do not create new entries; reducing exits use their own path.
+These policy targets are saved in observations, but the source collector has no
+connected decision model, review queue or execution coordinator yet. It does not
+report an active signal gate or claim calibrated offline decisions/performance.
+
 Read actual public **mainnet** market data without an API key:
 
 ```powershell
@@ -1236,13 +1275,13 @@ Read actual public **mainnet** market data without an API key:
 ```
 
 The command reads only the public `https://api.hyperliquid.xyz/info` endpoint:
-perpetual metadata/asset contexts, BTC/ETH order books and recent five-minute
+perpetual metadata/asset contexts, eight order books and recent five-minute
 candles. It does not use testnet prices. It has no exchange-order, withdrawal,
 wallet or signing client. Its request allowlist also refuses unrequested action
 types and extra signature/wallet fields. Transient HTTP/rate-limit errors receive
 bounded retries; permanent failures surface without switching data sources.
 
-The console prints best bid/ask, mark and oracle prices, current hourly funding,
+The console prints display prices, contract best bid/ask, current hourly funding,
 completed candle counts and causal feature counts. Book age uses the exchange's
 millisecond timestamp and must be strictly under 30 seconds at validation and
 again before publication. Reception does not freshen a stale book. Asset contexts
@@ -1259,11 +1298,13 @@ with a new completed window. The existing eight trailing features are computed
 without labels, fitted scaling or model inference.
 
 A new immutable `data/hyperliquid/live/snapshot_<UTC>_<id>/` contains raw public
-responses, BTC/ETH completed candle and feature Parquets, and `snapshot.json` with
+responses, eight completed candle and feature Parquets, and `snapshot.json` with
 configuration/artifact hashes, quality, source times and contract context. Frames
 use `exchange = hyperliquid` and symbols `BTC-USDC` / `ETH-USDC`; the manifest
 explicitly identifies perpetuals. Publication is atomic and supports long native
-Windows paths. A stale book, advanced candle boundary or changed config before
+Windows paths. Filenames replace the `xyz:` colon with an underscore, preserving
+the original exchange identifiers inside reports and frames. A stale book,
+advanced candle boundary or changed config before
 publication leaves no published bundle. Runtime observations are ignored by Git.
 
 Optionally collect each new completed five-minute window until Ctrl+C:
@@ -1292,6 +1333,10 @@ the data collector does **not** start its performance clock. A profitable month
 must include modeled fees, slippage and funding; it is a review milestone and
 does not enable live execution automatically. Live execution requires a separate
 implementation and explicit approval at that time.
+
+An execution adapter boundary makes a future broker implementation replaceable;
+going live also needs signed order handling, exchange/account reconciliation and
+venue-specific risk checks. It is not enabled by changing one paper-fill file.
 
 Primary references: [public API](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint),
 [funding](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/funding),
