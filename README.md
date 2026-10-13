@@ -1088,16 +1088,72 @@ consumed by research, point forecasts supply no uncertainty interval, and a
 fresh later period plus freshness/account/risk checks remain necessary for the
 eventual paper coordinator.
 
+## Independent paper entry risk checks
+
+The pure `risk.paper.authorize_paper_entry` function accepts a BUY candidate,
+timestamped quote and paper account snapshot. It sizes a simulated spot-long
+entry and returns an approval or a specific refusal. It creates no orders,
+changes no account state and never opens the saved historical datasets.
+Historical AVOID previews do not request entry authorization.
+
+The separate `[paper_risk]` table configures these starting limits:
+
+| Check | Default |
+| --- | --- |
+| Entry cash budget | 10% of current total equity |
+| Per-market / total marked exposure | 10% / 20% of projected equity |
+| Maximum drawdown / UTC daily loss | 10% / 2% |
+| Positions including pending entries | 2 |
+| Signal age | Strictly less than 2 candles |
+| Quote / account and portfolio mark age | Strictly less than 30 seconds |
+| Approval lifetime | At most 5 seconds |
+| Minimum entry cash outlay | $10 |
+
+Markets, candle duration and holding horizon come from the primary configuration;
+execution latency and modeled fee/spread/slippage come from its cost settings.
+The signal must be interval-aligned, its execution delay must have elapsed, and
+the quote must be from that eligible execution time or later. Future timestamps,
+stale historical signals, invalid prices, missing current-day equity baselines,
+duplicate holdings and inconsistent reservations are refused. The account must
+explicitly be a paper account denominated in USD.
+
+Current equity includes cash and every marked holding. Pending entries reserve
+cash, count toward position and exposure caps, and conservatively reduce projected
+equity by their possible entry costs; prospective gains do not increase it.
+New quantity includes adverse fill impact and entry fees within the cash budget.
+Projected equity, after those costs, must pass both loss limits and all exposure
+limits. Loss-limit equality blocks an entry. Setting `new_entries_enabled = false`
+pauses entries. **This entry gate must never veto a reducing exit**; SELL/HOLD
+actions are not entry requests.
+
+Approvals carry exact simulated sizing, fees, input fingerprint and account
+version. They expire at the earliest of their lifetime, any input freshness
+deadline or UTC midnight. `paper_authorization_is_current` reruns all checks and
+refuses changed inputs, sizing or account versions. The upcoming paper coordinator
+must recheck fresh inputs and commit against the same version atomically. These
+functions alone provide no persistent ledger, transaction lock or order execution.
+The existing immutable research protocols and historical simulator remain unchanged.
+
+Exercise the gate without models or an account ledger:
+
+```powershell
+& $projectPython -m local_ai_trader paper-risk-demo --config config/settings.toml
+```
+
+This diagnostic uses **invented probabilities, a positive test return and synthetic
+accounts**. Under the default config, one fresh candidate is approved; stale data,
+paused entries, loss boundaries, pending reservations and position limits are
+blocked. Nothing is saved or traded. The synthetic positive forecast is not a
+forecast for either market and does not change historical AVOID decisions.
+
 ## Next milestones
 
-1. Compare naive, logistic, XGBoost and MLP validation results on the predefined
-   90-day research partitions while reserving test data.
-2. Review temperature calibration on purged later-validation assessment periods,
-   then freeze model/calibration choices before the reserved test evaluation.
-3. Evaluate walk-forward stability with the frozen protocol, policy and costs.
-4. Add a Transformer only when evidence warrants it, then uncertainty, configurable
-   policy, a separate risk gate, paper trading, API and dashboard.
+1. Add a persistent paper ledger and coordinator that rechecks entry approval
+   before simulated fills and supports exits, restart and reconciliation.
+2. Connect current completed candles and saved models to the paper loop.
+3. Add a local API and dashboard showing forecasts, uncertainty, decisions,
+   risk refusals and paper-account results.
 
-Every change must demonstrate improvement against the previous model on suitable
-unseen data. Training, validation, test, backtest and paper-trading performance
-will be reported separately. A profitable backtest does not establish live profitability.
+More complex models remain conditional on evidence. Training, validation, test,
+backtest and paper results will be reported separately. The current models and
+historical policies have not demonstrated a profitable edge after costs.

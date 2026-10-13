@@ -94,6 +94,21 @@ require_model_comparison = true
 # Fractional net return on entry outlay: 0.002 = 0.2%, after both sides' costs.
 minimum_expected_net_return = 0.002
 
+[paper_risk]
+# Independent entry checks for the upcoming simulated paper account.
+new_entries_enabled = true
+allocation_fraction = 0.10
+max_position_exposure_fraction = 0.10
+max_total_exposure_fraction = 0.20
+max_drawdown_fraction = 0.10
+max_daily_loss_fraction = 0.02
+max_open_positions = 2
+max_signal_age_bars = 2
+max_quote_age_seconds = 30
+max_account_age_seconds = 30
+authorization_ttl_seconds = 5
+minimum_entry_cash = 10.0
+
 [download]
 lookback_days = 7
 timeout_seconds = 30
