@@ -130,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     decisions.add_argument("--models", type=Path, required=True, help="Saved Hyperliquid model batch directory")
     decisions.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
     decisions.add_argument("--watch", action="store_true", help="Archive one fresh decision preview per five-minute window until Ctrl+C")
+    decisions.add_argument("--track-outcomes", action="store_true", help="Record current predictions before future entry, resolve outcomes after 40 minutes; no fills")
     perp_demo = commands.add_parser("perpetual-paper-demo", help="Synthetic persisted USDC margin/funding workflow; no strategy or orders")
     perp_demo.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
     perp_status = commands.add_parser("perpetual-paper-status", help="Audit recorded USDC perpetual balances without fetching prices")
@@ -243,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
         elif arguments.command == "hyperliquid-decisions":
             from local_ai_trader.hyperliquid.decisions import run_decision_scanner
 
-            run_decision_scanner(arguments.config, arguments.models, watch=arguments.watch)
+            run_decision_scanner(arguments.config, arguments.models, watch=arguments.watch, track_outcomes=arguments.track_outcomes)
         elif arguments.command == "perpetual-paper-demo":
             from local_ai_trader.paper.perpetual_demo import perpetual_demo
 

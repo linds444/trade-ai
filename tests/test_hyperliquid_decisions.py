@@ -17,7 +17,7 @@ NOW = datetime(2026, 1, 5, 0, 5, 10, tzinfo=timezone.utc)
 
 def prediction(probability=0.8, gross=0.01):
     return {"primary_model": "xgboost", "probabilities": {"xgboost": np.array([[probability, (1-probability)/2, (1-probability)/2]])},
-            "return_forecasts": {"ridge": np.array([gross])}, "calibration_id": "sha256:fake-test-model",
+            "return_forecasts": {"ridge": np.array([gross]), "mean": np.array([0.0])}, "calibration_id": "sha256:fake-test-model",
             "confidence": None, "reliability_validation_id": None}
 
 
@@ -50,12 +50,15 @@ def scanner(tmp_path, monkeypatch):
     write_json(model_root / "models.json", {"coins": list(settings.coins), "protocol": protocol, "markets": {coin: {"status": "trained"} for coin in settings.coins}})
     monkeypatch.setattr(decisions, "load_saved_market", lambda root, coin: ({"protocol": protocol}, root, "sha256:fake-test-model"))
     def predict(root, coin, frame):
-        assert len(frame) == 1
+        assert len(frame) in (1, 2)
         assert frame.available_at.iloc[0].to_pydatetime() == NOW.replace(second=0)-timedelta(minutes=5)
+        if len(frame) == 2:
+            assert frame.available_at.iloc[-1].to_pydatetime() == NOW.replace(second=0)
         assert not any(name.startswith("execution_") for name in frame.columns)
         result = prediction()
         result["primary_model"] = "mlp" if coin == "BTC" else "xgboost"
-        result["probabilities"] = {result["primary_model"]: result["probabilities"]["xgboost"]}
+        result["probabilities"] = {result["primary_model"]: np.repeat(result["probabilities"]["xgboost"], len(frame), axis=0)}
+        result["return_forecasts"] = {name: np.repeat(values, len(frame)) for name, values in result["return_forecasts"].items()}
         return result
     monkeypatch.setattr(decisions, "predict_saved_market", predict)
     return client, config, model_root
@@ -181,3 +184,44 @@ def test_cli_publishes_preview_without_execution(scanner, monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "independent account risk not requested; no fills" in output
     assert "Saved live decision preview to" in output
+
+
+def test_forward_tracking_records_newest_signal_and_resolves_after_restart_and_40_minutes(scanner):
+    from local_ai_trader.hyperliquid.forward import track_preview
+    client, config, models = scanner
+    output, report = decisions.create_decision_preview(client, config, models, track_outcomes=True)
+    assert len(report["pending_forward_predictions"]) == 8
+    for coin, value in report["pending_forward_predictions"].items():
+        assert datetime.fromisoformat(value["signal_at"]) == NOW.replace(second=0)
+        assert datetime.fromisoformat(report["decisions"][coin]["signal_at"]) == NOW.replace(second=0)-timedelta(minutes=5)
+    path, summary = track_preview(client, output, report)
+    assert summary["recorded"] == 8 and summary["pending"] == 8 and summary["resolved"] == 0
+    del client._forward_books  # Emulate a fresh process reopening its book.
+    client.clock = lambda: NOW+timedelta(minutes=40)
+    _, summary = track_preview(client, output, report)
+    assert summary["recorded"] == 8 and summary["resolved"] == 8 and summary["pending"] == 0
+    assert summary["observed_accuracy"] == 0
+    assert summary["up_probability_ge_60_rows"] == 8 and summary["up_probability_ge_60_hits"] == 0
+    assert summary["confidence"] is None and summary["paper_profitability_trial_started"] is False
+    _, repeated = track_preview(client, output, report)
+    assert repeated == summary
+
+
+def test_late_tracker_does_not_backfill_unrecorded_predictions(scanner):
+    from local_ai_trader.hyperliquid.forward import track_preview
+    client, config, models = scanner
+    output, report = decisions.create_decision_preview(client, config, models, track_outcomes=True)
+    client.clock = lambda: NOW+timedelta(minutes=6)
+    _, summary = track_preview(client, output, report)
+    assert summary["recorded"] == summary["resolved"] == 0
+
+
+def test_forward_tracker_rejects_changed_preview(scanner):
+    from local_ai_trader.hyperliquid.forward import track_preview
+    client, config, models = scanner
+    output, report = decisions.create_decision_preview(client, config, models, track_outcomes=True)
+    changed = deepcopy(report)
+    changed["pending_forward_predictions"]["BTC"]["ridge_return"] = 0.1
+    write_json(output / "decisions.json", changed)
+    with pytest.raises(ValueError, match="preview changed"):
+        track_preview(client, output, report)

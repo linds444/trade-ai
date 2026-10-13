@@ -63,7 +63,7 @@ def decide_market(asset, prediction, policy):
             "position_assumption": "flat; zero occupied positions for signal preview only"}
 
 
-def create_decision_preview(client, config_path, model_directory):
+def create_decision_preview(client, config_path, model_directory, *, track_outcomes=False):
     config_path, model_directory = native_path(Path(config_path)).resolve(), native_path(Path(model_directory)).resolve()
     config_digest = file_digest(config_path)
     if load_hyperliquid_settings(config_path) != client.settings:
@@ -90,7 +90,7 @@ def create_decision_preview(client, config_path, model_directory):
     # Load/infer model libraries before executable-quote freshness checks.
     snapshot, raw, candles, features = client.snapshot()
     boundary = int(datetime.fromisoformat(snapshot["created_at"]).timestamp()) // 300 * 300
-    results = {}
+    results, pending = {}, {}
     for coin in client.settings.coins:
         asset = snapshot["assets"][coin]
         eligible = features[coin].loc[features[coin].available_at == pd.Timestamp(boundary-300, unit="s", tz="UTC")]
@@ -101,10 +101,21 @@ def create_decision_preview(client, config_path, model_directory):
             results[coin] = {"action": "AVOID", "decision_reason": "models_unavailable", "signal_gate": {"status": "BLOCK", "reason": "action_not_entry", "eligible_for_account_risk_check": False},
                              "calibrated_up_probability": None, "expected_gross_return": None, "modeled_net_return": None, "confidence": None, "account_risk_authorized": False}
         else:
-            prediction = predict_saved_market(model_directory, coin, eligible)
+            inference_frame = features[coin].iloc[-2:] if track_outcomes else eligible
+            batch = predict_saved_market(model_directory, coin, inference_frame)
+            prediction = {**batch, "probabilities": {name: values[:1] for name, values in batch["probabilities"].items()},
+                          "return_forecasts": {name: values[:1] for name, values in batch["return_forecasts"].items()}}
             if prediction["calibration_id"] != bindings[coin]:
                 raise ValueError("Saved scanner model changed during capture")
             results[coin] = decide_market(asset, prediction, client.settings.entry_policy)
+            if track_outcomes and batch["primary_model"] in batch["probabilities"]:
+                signal = features[coin].available_at.iloc[-1].to_pydatetime()
+                pending[coin] = {"coin": coin, "signal_at": signal.isoformat(), "issued_at": _utc(client.clock()).isoformat(),
+                                 "primary_model": batch["primary_model"], "calibration_id": batch["calibration_id"],
+                                 "probabilities": batch["probabilities"][batch["primary_model"]][-1].tolist(),
+                                 "ridge_return": float(batch["return_forecasts"]["ridge"][-1]),
+                                 "mean_return": float(batch["return_forecasts"]["mean"][-1]),
+                                 "features": {name: float(features[coin][name].iloc[-1]) for name in FEATURE_COLUMNS}}
         results[coin].update(symbol=BY_COIN[coin].symbol, coin=coin, signal_at=eligible.available_at.iloc[0].isoformat(),
                              inference_at=_utc(client.clock()).isoformat(), features={name: float(eligible[name].iloc[0]) for name in FEATURE_COLUMNS},
                              underlying_units_per_contract=BY_COIN[coin].underlying_units_per_contract)
@@ -133,6 +144,8 @@ def create_decision_preview(client, config_path, model_directory):
               "model_manifest_sha256": model_digest, "input_config_sha256": config_digest, "market_snapshot": snapshot, "decisions": results,
               "entry_policy": asdict(client.settings.entry_policy), "models_fitted": False, "test_opened": False,
               "paper_account_created": False, "paper_fills_created": False, "orders_created": False, "forward_strategy_started": False, "live_execution_enabled": False}
+    if track_outcomes:
+        report["pending_forward_predictions"] = pending
     try:
         write_json(staging / "raw_market.json", raw)
         (staging / "input_config.toml").write_bytes(config_path.read_bytes())
@@ -155,7 +168,7 @@ def create_decision_preview(client, config_path, model_directory):
     return output, report
 
 
-def run_decision_scanner(config_path, model_directory, *, watch=False):
+def run_decision_scanner(config_path, model_directory, *, watch=False, track_outcomes=False):
     settings = load_hyperliquid_settings(config_path)
     client = HyperliquidPublicClient(settings)
     last_boundary = None
@@ -166,7 +179,10 @@ def run_decision_scanner(config_path, model_directory, *, watch=False):
                 time.sleep(settings.poll_seconds)
                 continue
             try:
-                _, report = create_decision_preview(client, config_path, model_directory)
+                output, report = create_decision_preview(client, config_path, model_directory, track_outcomes=track_outcomes)
+                if track_outcomes:
+                    from local_ai_trader.hyperliquid.forward import track_preview
+                    track_preview(client, output, report)
                 last_boundary = int(datetime.fromisoformat(report["created_at"]).timestamp()) // 300
             except (ValueError, RuntimeError, OSError, KeyError) as error:
                 if not watch:

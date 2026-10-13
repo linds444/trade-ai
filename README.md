@@ -1672,3 +1672,50 @@ contexts must remain fresh at publication; a moved candle boundary, stale/future
 data or changed config/model refuses publication. Staging failures leave no
 partial preview. These observations create no account, order, fill or performance
 clock. `Ctrl+C` stops the scanner independently of the funding collector.
+
+## Prospective forecast outcomes alongside the scanner
+
+Stop only the decision scanner with `Ctrl+C`, update the branch, then restart
+with the same saved models and add `--track-outcomes`:
+
+```powershell
+& $projectPython -m local_ai_trader hyperliquid-decisions --models "data/hyperliquid/models/models_<UTC>_<id>" --config config/hyperliquid.toml --watch --track-outcomes
+```
+
+The entry preview still uses the delayed eligible signal. Separately, the
+tracker records the **newest completed signal** before its next future entry
+opening is known. These two rows are inferred together from the same frozen
+weights. Probabilities, causal features, Ridge/mean point forecasts, issuance,
+publication and source-preview hashes persist in a dedicated observation book.
+Issuance/publication and first insertion must all precede the one-bar-delayed
+entry; a late restart never backfills an unrecorded prediction after entry.
+
+At 40 minutes after the signal, completed real candles can resolve its delayed
+entry-open to six-bar exit-open return. Earlier resolution is refused even if
+future-looking inputs are supplied. The tracker first reuses the archived
+scanner candle response, then requests the exact public historical window when
+the pending signal falls outside that response. Missing intervals remain pending,
+without interpolation or fabricated outcomes. Long outages beyond API retention
+can leave permanently unavailable outcomes.
+
+The model/config-bound `data/hyperliquid/forward/<hash>/observations.sqlite`
+retains first-issued forecasts and resolved raw candle evidence. SQLite immediate
+transactions and full synchronous commits make deliveries restart-safe; duplicate
+forecasts/outcomes do not add counts, changed predictions or resolved economics
+refuse, and a failed batch rolls back. Startup audits reconstruct outcomes from
+raw candles, check record hashes and reconcile counters, including deletion
+detection. Watch mode caches the audited book and uses SQL diagnostic aggregates
+rather than reconstructing a growing month of outcomes every tick. Model or
+configuration changes select a separate observation book.
+
+Initially expect **8 recorded, 8 pending, 0 resolved** if all eight primary
+models are available. More predictions accumulate each five-minute window; the
+first outcomes mature 40 minutes after their signal time. Descriptive accuracy
+includes flat labels; the separate up-probability-at-least-60% hit counts show
+that directional subset. Ridge and mean MAE are gross-return forecast errors.
+Adjacent targets overlap and markets correlate, so neither row counts nor these
+descriptive metrics are independent samples, a confidence interval, validated
+reliability, net trading profit or approval to enter. Confidence remains
+unavailable and the **paper-profitability trial has not started**. This option
+collects the genuinely prospective evidence needed for later reliability work;
+it never fits models or opens reserved test partitions.
