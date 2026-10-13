@@ -7,8 +7,10 @@ persistent spot-paper execution foundation.
 
 The current deployment target is **eight Hyperliquid perpetuals, 1× leverage,
 long only**. Its public mainnet data feed validates and archives live observations
-without a wallet key. Funding-aware USDC paper accounting and venue-bound models
-are the next integration steps. Live execution is disabled.
+without a wallet key. A separate restartable USDC perpetual accounting foundation
+handles margin reservation, costs and recorded funding. Venue-bound models,
+funding collection and liquidation rules remain integration steps. Live execution
+is disabled.
 
 ## Verified starting environment
 
@@ -1336,8 +1338,9 @@ funding to an account or fabricate paper fills/performance.
 The earlier Coinbase datasets/models are historical spot research, and the
 existing persistent ledger settles simulated spot buys in USD. They are not
 silently relabeled or connected as a Hyperliquid perpetual strategy. Next work
-must add USDC margin/mark-to-market/funding accounting and venue-bound model
-training/inference before starting the actual forward paper trial. Merely running
+must connect the separate USDC accounting foundation to observed funding, venue
+liquidation rules and venue-bound model training/inference before starting the
+actual forward paper trial. Merely running
 the data collector does **not** start its performance clock. A profitable month
 must include modeled fees, slippage and funding; it is a review milestone and
 does not enable live execution automatically. Live execution requires a separate
@@ -1354,7 +1357,7 @@ Primary references: [public API](https://hyperliquid.gitbook.io/hyperliquid-docs
 
 ## Next milestones
 
-1. Add funding-aware USDC perpetual paper accounting and Hyperliquid-trained models.
+1. Connect observed funding, venue liquidation rules and Hyperliquid-trained models.
 2. Connect the saved models and public feed to a scheduled forward paper loop.
 3. Add a local API and dashboard showing forecasts, uncertainty, decisions,
    risk refusals and paper-account results.
@@ -1362,3 +1365,77 @@ Primary references: [public API](https://hyperliquid.gitbook.io/hyperliquid-docs
 More complex models remain conditional on evidence. Training, validation, test,
 backtest and paper results will be reported separately. The current models and
 historical policies have not demonstrated a profitable edge after costs.
+
+## USDC perpetual paper accounting foundation
+
+`PerpetualPaperAccount` is separate from the historical USD spot ledger. Its
+virtual USDC wallet retains collateral principal; a 1× position reserves initial
+margin equal to quantity × entry fill price. Wallet cash moves only for fees,
+realized fill-price PnL and recorded funding. Equity adds unrealized mark-to-market
+PnL. Available collateral uses the lower of wallet and equity minus reserved
+margin, preventing unrealized gains from being spent. Quantities and oracle
+prices remain in exchange contract units, including `kPEPE`.
+
+The account freezes its source mode, policy, risk profile and slippage assumption
+at creation. Defaults preserve 10% per-position exposure, 20% total exposure,
+10% drawdown and 2% UTC daily loss. Five positions is a ceiling; total exposure
+still applies. Independent signal checks require calibrated probability and a
+separately validated reliability measure. The trusted model adapter must verify
+their artifact references; nonempty IDs are audit references, not a calibration
+procedure performed by the account. Missing reliability routes to REVIEW.
+Entries also require fresh portfolio marks, delayed causal signal timing and
+forecast coverage of spread, slippage, both fees, a nonnegative funding cost
+budget and a 0.2% net margin. Missing funding-cost estimates route to REVIEW.
+
+Funding requires a settled UTC-hour rate with provenance and an oracle recorded
+within 30 seconds of that settlement. Positive rates debit longs, negative rates
+credit them, using **quantity × oracle price × settled hourly rate**. Current
+context funding is not used as a guaranteed settled rate. Oracle observations
+near an exchange settlement are explicitly modeled estimates in observed-mode
+accounts, not reconstructed exact historical exchange oracles. Synthetic funding
+cannot be inserted into observed-mode accounts.
+
+Every held UTC-hour boundary must have a recorded settlement. Missing hours make
+performance provisional and block new entries. They do not block reducing exits.
+Later funding can settle a closed position's outstanding liability, updating its
+net PnL and wallet without inventing another fill. The same coin/hour cannot be
+charged twice or silently changed. Holding deadlines start at actual fill time;
+missed deadlines use current fresh quotes. Overnight holdings without a known
+UTC opening-equity baseline block entries for that day; closing them does not
+erase the missing baseline. Pauses and loss limits never veto a fresh exit.
+
+SQLite `BEGIN IMMEDIATE` and full synchronous transactions save the operation,
+state and checksum chain together. Stable operation IDs replay their original
+receipts across restarts, including blocks; changed inputs refuse. Quotes and
+the five-second execution window are rechecked before commit. Startup and status
+perform complete deterministic journal replay; mutations check the current state
+and journal head, and duplicate replays verify their own receipt checksums. A
+normal exception or worker death before commit leaves no partial fill or margin
+reservation. Deep native Windows paths work without a registry change.
+
+Run a controlled accounting demonstration:
+
+```powershell
+& $projectPython -m local_ai_trader perpetual-paper-demo --config config/hyperliquid.toml
+```
+
+It creates an explicitly **synthetic** account under
+`data/hyperliquid/paper/synthetic_perpetual_<UTC>_<id>/account.sqlite`, opens an
+invented-price long, verifies a duplicate after restart, posts one invented
+hourly funding charge, retries it without double charging, then exits after
+restart. Two fills, one closed trade, released margin and no missing funding must
+reconcile. Prices, probabilities, reliability inputs, forecasts and funding are
+invented test data; any positive PnL is not strategy performance. Existing live
+observations and spot accounts remain separate. No new dependencies are needed.
+
+Inspect last recorded values without fetching prices:
+
+```powershell
+& $projectPython -m local_ai_trader perpetual-paper-status "data/hyperliquid/paper/<account-directory>/account.sqlite"
+```
+
+This foundation models conservative collateral reservation, not exact isolated
+or cross-margin liquidation mechanics. It is not yet wired to a live strategy,
+funding collector or liquidation monitor, and does not start the 30-day trial.
+Venue-specific margin/liquidation rules and verified model/source adapters must
+be connected before that trial begins. Live execution remains unavailable.

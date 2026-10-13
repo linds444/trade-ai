@@ -117,6 +117,10 @@ def main(argv: list[str] | None = None) -> int:
     hyperliquid = commands.add_parser("hyperliquid-feed", help="Validate public Hyperliquid mainnet books and completed candles; no trading")
     hyperliquid.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
     hyperliquid.add_argument("--watch", action="store_true", help="Save each new completed 5-minute window until Ctrl+C")
+    perp_demo = commands.add_parser("perpetual-paper-demo", help="Synthetic persisted USDC margin/funding workflow; no strategy or orders")
+    perp_demo.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
+    perp_status = commands.add_parser("perpetual-paper-status", help="Audit recorded USDC perpetual balances without fetching prices")
+    perp_status.add_argument("path", type=Path)
     inspect = commands.add_parser("inspect", help="Query a Parquet dataset using DuckDB")
     inspect.add_argument("path", type=Path)
     targets = commands.add_parser("targets", help="Build causal-time-labelled forward-return targets")
@@ -211,6 +215,14 @@ def main(argv: list[str] | None = None) -> int:
             from local_ai_trader.hyperliquid.feed import run_hyperliquid_feed
 
             run_hyperliquid_feed(arguments.config, watch=arguments.watch)
+        elif arguments.command == "perpetual-paper-demo":
+            from local_ai_trader.paper.perpetual_demo import perpetual_demo
+
+            perpetual_demo(arguments.config)
+        elif arguments.command == "perpetual-paper-status":
+            from local_ai_trader.paper.perpetual_demo import perpetual_status
+
+            perpetual_status(arguments.path)
         elif arguments.command == "execution-targets":
             from local_ai_trader.forecast.targets import create_execution_target_dataset
 
