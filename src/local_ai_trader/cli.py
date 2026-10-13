@@ -5,6 +5,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import logging
 from pathlib import Path
+import sqlite3
 
 import duckdb
 
@@ -109,6 +110,10 @@ def main(argv: list[str] | None = None) -> int:
     decision_preview.add_argument("--return-model", choices=("mean", "ridge"), default="ridge", help="Return model within the saved run (default: ridge)")
     paper_risk = commands.add_parser("paper-risk-demo", help="Exercise independent entry checks using synthetic inputs; no orders")
     paper_risk.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    paper_demo = commands.add_parser("paper-demo", help="Persist a synthetic paper buy/exit and verify restart; no broker connection")
+    paper_demo.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    paper_status = commands.add_parser("paper-status", help="Audit an existing paper SQLite account without fetching prices")
+    paper_status.add_argument("path", type=Path, help="Path to account.sqlite")
     inspect = commands.add_parser("inspect", help="Query a Parquet dataset using DuckDB")
     inspect.add_argument("path", type=Path)
     targets = commands.add_parser("targets", help="Build causal-time-labelled forward-return targets")
@@ -191,6 +196,14 @@ def main(argv: list[str] | None = None) -> int:
             from local_ai_trader.risk.demo import paper_risk_demo
 
             paper_risk_demo(arguments.config)
+        elif arguments.command == "paper-demo":
+            from local_ai_trader.paper.demo import paper_demo
+
+            paper_demo(arguments.config)
+        elif arguments.command == "paper-status":
+            from local_ai_trader.paper.demo import paper_status
+
+            paper_status(arguments.path)
         elif arguments.command == "execution-targets":
             from local_ai_trader.forecast.targets import create_execution_target_dataset
 
@@ -249,6 +262,6 @@ def main(argv: list[str] | None = None) -> int:
                 ).fetchdf()
             print(summary.to_string(index=False))
         return 0
-    except (ValueError, OSError, RuntimeError, KeyError, duckdb.Error) as error:
+    except (ValueError, OSError, RuntimeError, KeyError, sqlite3.Error, duckdb.Error) as error:
         LOGGER.error("%s", error)
         return 1

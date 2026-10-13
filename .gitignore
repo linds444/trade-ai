@@ -12,6 +12,7 @@ __pycache__/
 data/raw/
 data/processed/
 data/models/
+data/paper/
 runs/
 logs/
 build/

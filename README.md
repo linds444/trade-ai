@@ -1129,7 +1129,7 @@ actions are not entry requests.
 Approvals carry exact simulated sizing, fees, input fingerprint and account
 version. They expire at the earliest of their lifetime, any input freshness
 deadline or UTC midnight. `paper_authorization_is_current` reruns all checks and
-refuses changed inputs, sizing or account versions. The upcoming paper coordinator
+refuses changed inputs, sizing or account versions. The paper coordinator
 must recheck fresh inputs and commit against the same version atomically. These
 functions alone provide no persistent ledger, transaction lock or order execution.
 The existing immutable research protocols and historical simulator remain unchanged.
@@ -1146,12 +1146,81 @@ paused entries, loss boundaries, pending reservations and position limits are
 blocked. Nothing is saved or traded. The synthetic positive forecast is not a
 forecast for either market and does not change historical AVOID decisions.
 
+## Persistent paper account and execution coordinator
+
+`paper.ledger.PaperLedger` stores a USD spot-long simulated account in SQLite.
+It uses Python's standard library and makes no broker requests. Each operation
+locks the account with `BEGIN IMMEDIATE`, refreshes observed marks, checks risk
+against the locked version and saves cash, holdings, fills, closed trades and its
+journal in one transaction. Full synchronous commits preserve SQLite recovery.
+A failure before commit rolls back every change. Competing processes reread the
+committed account rather than spending against an old snapshot.
+
+Creation freezes the market/timing, cost and risk contract, hashes it and refuses
+an existing file. Accounts start with the configured simulated cash, not a deposit.
+An entry accepts a structured candidate and quote plus timestamped marks for
+existing holdings. It obtains its own approval inside the transaction and checks
+expiry again before commit; outside approvals cannot execute an order. Real-time
+callers leave `now` unset so freshness uses the clock after the lock is acquired.
+The explicit clock parameter is for deterministic tests/replay.
+
+Every mutation requires a stable operation ID. Retrying identical inputs returns
+the original result, including after restart, and adds no fill or account version.
+Using the same ID with changed inputs is refused. Refusals are journaled too; a
+new attempt needs a new ID. An optional expected account version refuses a stale
+worker. There are no outstanding broker orders or persistent entry queues in this
+coordinator: an approved fill commits immediately. Earlier signal scheduling
+belongs to the upcoming current-data loop, and execution still checks latency.
+
+Entries use the existing modeled adverse buy impact and entry fees within their
+cash budget. Positions record actual fill time, original quote time and a holding
+deadline starting at the fill. Full exits use fresh sell quotes with adverse
+impact and exit fees. Policy, risk and manual exits bypass entry pauses and loss
+filters. Holding-deadline exits require a quote from the deadline or later, use
+stable position-specific IDs, and cannot accidentally close a replacement
+position. Missed deadlines after downtime wait for a fresh quote; no past fill
+price is invented. A late or early exit differs from the forecaster's fixed
+open-to-open target window.
+
+Daily limits keep the recorded UTC opening equity. When the account was flat at
+midnight, the coordinator reconstructs that value from initial cash and prior
+fills. An overnight holding requires explicitly supplied observed midnight marks.
+If they are unavailable, new entries remain blocked and exits remain available.
+Selling an overnight position cannot erase that day's missing baseline or losses.
+
+Restart and `audit()` reconstruct cash and inventory from all fills, verify
+modeled costs, closed trade PnL, operation hashes, version sequence and the last
+journaled account/marks. Marked equity minus starting cash equals realized plus
+unrealized net PnL. Status is read-only and reports the last marked values; it
+does not fetch current prices. Runtime entry pause/resume is persisted separately
+and cannot override a disabled frozen risk setting. Extended native Windows paths
+support deeply nested account files without changing the user's registry.
+
+Run a controlled persistence demonstration:
+
+```powershell
+& $projectPython -m local_ai_trader paper-demo --config config/settings.toml
+```
+
+This creates a new **synthetic** account under
+`data/paper/synthetic_<UTC>_<id>/account.sqlite`, records an invented $100 reference
+entry, retries it, reopens the database and fast-forwards the test clock to a $102
+holding-deadline exit. It audits exactly two fills, one closed trade and no open
+holdings. Its hand-picked prices and positive test forecast are not model outputs
+or strategy performance. The console prints the saved account path. Paper
+databases are ignored by Git; historical data, models and AVOID previews remain
+unchanged.
+
+Inspect a saved account without changing it:
+
+```powershell
+& $projectPython -m local_ai_trader paper-status "data/paper/<account-directory>/account.sqlite"
+```
+
 ## Next milestones
 
-1. Add a persistent paper ledger and coordinator that rechecks entry approval
-   before simulated fills and supports exits, restart and reconciliation.
-2. Connect current completed candles and saved models to the paper loop.
-3. Add a local API and dashboard showing forecasts, uncertainty, decisions,
+1. Connect current completed candles and saved models to a scheduled paper loop.
+2. Add a local API and dashboard showing forecasts, uncertainty, decisions,
    risk refusals and paper-account results.
 
 More complex models remain conditional on evidence. Training, validation, test,
