@@ -47,14 +47,25 @@ def _initial(contract):
             "positions": {}, "trades": [], "settlements": {}}
 
 
-def _gaps(state, now):
+def _gaps(state, now, actual_events=False):
     missing = set()
     for position in list(state["positions"].values()) + state["trades"]:
         end = min(now, _time(position.get("exit_at", _iso(now))))
-        hour = _hour(_time(position["entry_at"])) + timedelta(hours=1)
+        entered = _time(position["entry_at"])
+        hour = _hour(entered)
+        if not actual_events:
+            hour += timedelta(hours=1)
         while hour <= end:
             key = position["coin"] + "|" + _iso(hour)
-            if key not in state["settlements"]:
+            known = state["settlements"].get(key)
+            if known is not None:
+                settlement_at = _time(known.get("exchange_event_at", known["hour"]))
+                owed = entered < settlement_at <= end
+            else:
+                # The real settlement may occur just after the hour. A position
+                # opened in the first 30s needs that event to resolve eligibility.
+                owed = entered < hour or entered < hour + timedelta(seconds=30)
+            if owed and known is None:
                 missing.add(key)
             hour += timedelta(hours=1)
     return sorted(missing)
@@ -92,12 +103,13 @@ def _report(state, contract):
     open_net = math.fsum(p["quantity"] * (p["mark_price"] - p["entry_fill_price"]) - p["entry_fee"] + p["funding_cash_flow"] for p in state["positions"].values())
     if not math.isclose(equity - contract["initial_collateral"], realized + open_net, rel_tol=1e-10, abs_tol=1e-8):
         raise ValueError("Perpetual equity does not reconcile")
-    missing = _gaps(state, _time(state["as_of"]))
+    missing = _gaps(state, _time(state["as_of"]), contract.get("funding_time_basis") == "exchange_event")
     return {**deepcopy(state), "mode": "paper_perpetual", "currency": "USDC", "source_mode": contract["source_mode"],
             "configured_leverage": 1, "equity": equity, "reserved_initial_margin": margin,
             "available_collateral": available, "realized_net_pnl": realized, "unrealized_net_pnl": open_net,
             "missing_funding": missing, "performance_provisional": bool(missing), "reconciled": True,
             "funding_oracle_estimated": contract["source_mode"] == "observed" and bool(state["settlements"]),
+            "funding_time_basis": contract.get("funding_time_basis", "utc_hour"),
             "fill_count": len(state["trades"]) * 2 + len(state["positions"]),
             "live_execution_enabled": False, "liquidation_simulated": False}
 
@@ -106,10 +118,11 @@ def _reduce(state, contract, event):
     state = deepcopy(state)
     now, inputs, kind = _time(event["at"]), event["inputs"], event["kind"]
     risk = contract["risk"]
+    actual_events = contract.get("funding_time_basis") == "exchange_event"
     if now < _time(state["as_of"]):
         raise ValueError("Perpetual account time cannot move backwards")
     if state["day"] != _iso(now)[:10]:
-        state["day_start_equity"] = state["wallet_balance"] if not state["positions"] and not _gaps(state, now) else None
+        state["day_start_equity"] = state["wallet_balance"] if not state["positions"] and not _gaps(state, now, actual_events) else None
         state["day"] = _iso(now)[:10]
     state["as_of"] = _iso(now)
     result = {"status": "blocked", "reason": "unsupported_operation"}
@@ -134,10 +147,15 @@ def _reduce(state, contract, event):
         if inputs.get("source_mode") != contract["source_mode"]:
             raise ValueError("Funding source mode disagrees with account")
         coin, hour = inputs["coin"], _time(inputs["hour"])
+        settlement_at = _time(inputs.get("exchange_event_at", inputs["hour"])) if actual_events else hour
         rate, oracle = _number(inputs["rate"]), _number(inputs["oracle_price"], positive=True)
         if coin not in contract["coins"] or hour != _hour(hour) or hour > now or abs(rate) > 0.04:
             raise ValueError("Invalid settled hourly funding")
-        if abs((_time(inputs["oracle_at"]) - hour).total_seconds()) >= 30 or _time(inputs["oracle_at"]) > now:
+        if not 0 <= (settlement_at - hour).total_seconds() < 30 or settlement_at > now:
+            raise ValueError("Invalid actual funding settlement timestamp")
+        if "rate_observed_at" in inputs and not settlement_at <= _time(inputs["rate_observed_at"]) <= now:
+            raise ValueError("Funding rate evidence is future-dated or predates settlement")
+        if abs((_time(inputs["oracle_at"]) - settlement_at).total_seconds()) >= 30 or _time(inputs["oracle_at"]) > now:
             raise ValueError("Require an observed oracle near the funding settlement, not a current mark")
         if not all(isinstance(inputs.get(key), str) and inputs[key].strip() for key in ("rate_source_id", "oracle_source_id")):
             raise ValueError("Funding requires settled-rate and oracle provenance")
@@ -149,7 +167,7 @@ def _reduce(state, contract, event):
         else:
             amount = 0.0
             for position in list(state["positions"].values()) + state["trades"]:
-                if position["coin"] == coin and _time(position["entry_at"]) < hour <= _time(position.get("exit_at", _iso(now))):
+                if position["coin"] == coin and _time(position["entry_at"]) < settlement_at <= _time(position.get("exit_at", _iso(now))):
                     flow = -position["quantity"] * oracle * rate
                     position["funding_cash_flow"] += flow
                     amount += flow
@@ -197,7 +215,7 @@ def _reduce(state, contract, event):
                 (not state["entries_enabled"], "new_entries_paused"),
                 (coin in state["positions"], "position_already_open"),
                 (signal.timestamp() % 300 != 0 or not 300 <= age < 600 or _time(quote["at"]) < signal + timedelta(minutes=5), "invalid_or_stale_signal"),
-                (bool(_gaps(state, now)), "missing_funding_settlement"),
+                (bool(_gaps(state, now, actual_events)), "missing_funding_settlement"),
                 (any(not 0 <= (now - _time(p["marked_at"])).total_seconds() < 30 for p in state["positions"].values()), "stale_position_mark"),
                 (state["day_start_equity"] is None, "daily_equity_unavailable"),
                 (equity <= 0 or projected <= 0, "nonpositive_equity"),
@@ -292,7 +310,8 @@ class PerpetualPaperAccount:
         now = _utc(now or datetime.now(timezone.utc))
         contract = {"schema_version": 1, "mode": "paper_perpetual", "currency": "USDC", "leverage": 1,
                     "coins": list(coins), "initial_collateral": initial_collateral, "slippage_bps": slippage_bps,
-                    "source_mode": source_mode, "created_at": _iso(now), "entry_policy": asdict(policy), "risk": dict(RISK_LIMITS)}
+                    "source_mode": source_mode, "created_at": _iso(now), "entry_policy": asdict(policy), "risk": dict(RISK_LIMITS),
+                    "funding_time_basis": "exchange_event"}
         path = native_path(path).resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("xb"):

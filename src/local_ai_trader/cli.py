@@ -117,6 +117,9 @@ def main(argv: list[str] | None = None) -> int:
     hyperliquid = commands.add_parser("hyperliquid-feed", help="Validate public Hyperliquid mainnet books and completed candles; no trading")
     hyperliquid.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
     hyperliquid.add_argument("--watch", action="store_true", help="Save each new completed 5-minute window until Ctrl+C")
+    funding = commands.add_parser("hyperliquid-funding", help="Archive settled rates and observed oracle proxies; no orders")
+    funding.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
+    funding.add_argument("--watch", action="store_true", help="Capture hourly oracle windows and changed funding history until Ctrl+C")
     perp_demo = commands.add_parser("perpetual-paper-demo", help="Synthetic persisted USDC margin/funding workflow; no strategy or orders")
     perp_demo.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
     perp_status = commands.add_parser("perpetual-paper-status", help="Audit recorded USDC perpetual balances without fetching prices")
@@ -215,6 +218,10 @@ def main(argv: list[str] | None = None) -> int:
             from local_ai_trader.hyperliquid.feed import run_hyperliquid_feed
 
             run_hyperliquid_feed(arguments.config, watch=arguments.watch)
+        elif arguments.command == "hyperliquid-funding":
+            from local_ai_trader.hyperliquid.funding import run_funding_collector
+
+            run_funding_collector(arguments.config, watch=arguments.watch)
         elif arguments.command == "perpetual-paper-demo":
             from local_ai_trader.paper.perpetual_demo import perpetual_demo
 

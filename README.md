@@ -9,7 +9,7 @@ The current deployment target is **eight Hyperliquid perpetuals, 1× leverage,
 long only**. Its public mainnet data feed validates and archives live observations
 without a wallet key. A separate restartable USDC perpetual accounting foundation
 handles margin reservation, costs and recorded funding. Venue-bound models,
-funding collection and liquidation rules remain integration steps. Live execution
+recorded-funding integration and liquidation rules remain integration steps. Live execution
 is disabled.
 
 ## Verified starting environment
@@ -1357,7 +1357,7 @@ Primary references: [public API](https://hyperliquid.gitbook.io/hyperliquid-docs
 
 ## Next milestones
 
-1. Connect observed funding, venue liquidation rules and Hyperliquid-trained models.
+1. Connect recorded funding, venue liquidation rules and Hyperliquid-trained models.
 2. Connect the saved models and public feed to a scheduled forward paper loop.
 3. Add a local API and dashboard showing forecasts, uncertainty, decisions,
    risk refusals and paper-account results.
@@ -1395,7 +1395,14 @@ near an exchange settlement are explicitly modeled estimates in observed-mode
 accounts, not reconstructed exact historical exchange oracles. Synthetic funding
 cannot be inserted into observed-mode accounts.
 
-Every held UTC-hour boundary must have a recorded settlement. Missing hours make
+New accounts preserve the actual published funding event milliseconds, not just
+the UTC-hour label. A position opened or closed between the nominal hour and
+actual settlement is charged only if held at the real event. Until its event is
+known, entries in the first 30 seconds of an hour have conservative unresolved
+funding coverage. Older hour-based accounts retain their original semantics;
+they are not silently converted into observed accounts with actual event timing.
+
+Every potentially held settlement must have a recorded event. Missing hours make
 performance provisional and block new entries. They do not block reducing exits.
 Later funding can settle a closed position's outstanding liability, updating its
 net PnL and wallet without inventing another fill. The same coin/hour cannot be
@@ -1435,7 +1442,71 @@ Inspect last recorded values without fetching prices:
 ```
 
 This foundation models conservative collateral reservation, not exact isolated
-or cross-margin liquidation mechanics. It is not yet wired to a live strategy,
-funding collector or liquidation monitor, and does not start the 30-day trial.
+or cross-margin liquidation mechanics. It is not yet wired to a live strategy or
+liquidation monitor, and does not start the 30-day trial. The recorded-funding
+adapter described below is available for the future coordinator.
 Venue-specific margin/liquidation rules and verified model/source adapters must
 be connected before that trial begins. Live execution remains unavailable.
+
+## Recorded Hyperliquid funding and oracle evidence
+
+Read the latest 24 UTC funding hours for the configured eight contracts:
+
+```powershell
+& $projectPython -m local_ai_trader hyperliquid-funding --config config/hyperliquid.toml
+```
+
+The collector uses only public mainnet `/info` funding history, DEX metadata,
+asset contexts and order books. It preserves the actual publication timestamp
+(typically milliseconds after the hour), settled signed rate, premium and the
+time the response became available. Invalid/future event times, conflicting
+same-hour records, wrong coins and nonfinite rates are refused. Missing rate
+hours are named, never replaced by current context funding forecasts.
+
+Funding history does **not** contain historical oracle prices. The collector
+records an observed current oracle with its reception time and an independently
+fresh exchange-timestamped book. Contexts have no exchange timestamp, so these
+observations remain explicitly modeled proxies. Only a recorded oracle within
+strictly 30 seconds of the actual funding event can pair with its settled rate.
+The closest valid observation is chosen deterministically. A current mid-hour
+oracle cannot supply an unobserved old settlement; no forward-fill, interpolation
+or mark-price substitution is performed.
+
+An immutable `data/hyperliquid/funding/capture_<UTC>_<id>/` stores `raw.json`, the
+exact input TOML and `capture.json`, with artifact/config hashes and all receipt
+times. Loading recomputes the summary from raw evidence. Publication takes an OS
+lock, checks prior economic values for conflicts, rechecks configuration and book
+freshness, and atomically renames the staged directory. A failed publication
+leaves no capture. OS locks release on process death without requiring manual
+stale-lock removal; their small marker file is retained. Native deep Windows
+paths work without enabling a registry setting.
+
+Collect upcoming settlement windows until Ctrl+C:
+
+```powershell
+& $projectPython -m local_ai_trader hyperliquid-funding --config config/hyperliquid.toml --watch
+```
+
+At the default ten-second polling interval, watch mode archives oracle samples
+in the 30 seconds before and after each hour, plus changed settled history.
+Away from those windows it checks once a minute and avoids repeated full-response
+bundles when rates are unchanged. Funding history is cached for up to 60 seconds
+and refreshed when the hour changes. Near-hour samples remain available when a
+settled rate appears later. Preview pairing uses only the latest 24 funding hours
+and relevant captures rather than scanning a growing month of data each tick.
+Data errors are logged and retried without inventing observations.
+
+On first launch, **zero accounting-ready settlements and 192 rates lacking
+historical oracle evidence can be normal**: 24 hours × eight markets were observed
+after their settlements. As future hourly oracle windows are recorded, those new
+events become ready when their rates are published. The collector itself creates
+no account, fill, model or order, and does not start the forward strategy clock.
+
+`apply_recorded_funding` is the future coordinator adapter. It accepts only an
+observed-mode account with actual event timing, audits the archive, posts only
+that account's missing eligible events with stable IDs and leaves unmatched
+hours provisional. Recorded response availability and oracle times must precede
+application, preventing retrospective future-data use. Repeating the adapter
+does not charge another settlement or create a trade. Observed oracle proxies
+remain estimates in account reports. Existing synthetic accounts cannot consume
+these mainnet records.

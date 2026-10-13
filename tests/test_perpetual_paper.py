@@ -11,6 +11,7 @@ import pytest
 
 from local_ai_trader.cli import main
 from local_ai_trader.paper.perpetual import PerpetualPaperAccount
+from local_ai_trader.paper.ledger import _hash
 from local_ai_trader.paper import perpetual
 from local_ai_trader.paper.perpetual_demo import perpetual_demo, perpetual_status
 from local_ai_trader.risk.entry_policy import EntryPolicy, SignalEvidence
@@ -303,6 +304,38 @@ def test_observed_account_rejects_synthetic_funding_source(tmp_path):
     account = PerpetualPaperAccount.create(tmp_path / "observed.sqlite", now=NOW, source_mode="observed")
     with pytest.raises(ValueError, match="source mode"):
         account.execute("fund", "funding", funding(), now=HOUR)
+
+
+@pytest.mark.parametrize("opened_offset,closed_offset,expected", [
+    (0.05, None, -0.0909), (0.10, None, 0), (-300, 0.05, 0), (-300, 0.10, -0.0909),
+])
+def test_actual_funding_milliseconds_determine_boundary_eligibility(tmp_path, opened_offset, closed_offset, expected):
+    opened = HOUR + timedelta(seconds=opened_offset)
+    account = PerpetualPaperAccount.create(tmp_path / "boundary.sqlite", now=opened)
+    account.execute("entry", "entry", entry(opened), now=opened)
+    if closed_offset is not None:
+        close(account, at=HOUR + timedelta(seconds=closed_offset), reason="manual")
+    at = HOUR + timedelta(seconds=1)
+    result = account.execute("fund", "funding", funding(exchange_event_at=HOUR + timedelta(milliseconds=80)), now=at)
+    assert result["cash_flow"] == pytest.approx(expected)
+    assert account.audit()["missing_funding"] == []
+
+
+def test_funding_rate_evidence_cannot_be_used_before_observed(account):
+    with pytest.raises(ValueError, match="evidence"):
+        account.execute("fund", "funding", funding(rate_observed_at=HOUR + timedelta(seconds=1)), now=HOUR)
+
+
+def test_legacy_hour_based_account_remains_readable_without_relabelling(tmp_path):
+    account = PerpetualPaperAccount.create(tmp_path / "legacy.sqlite", now=NOW)
+    with sqlite3.connect(str(account.path)) as db:
+        contract = json.loads(db.execute("SELECT contract FROM account").fetchone()[0])
+        del contract["funding_time_basis"]
+        db.execute("UPDATE account SET contract=?,contract_hash=?", (json.dumps(contract), _hash(contract)))
+    legacy = PerpetualPaperAccount(account.path)
+    legacy.execute("entry", "entry", entry(), now=NOW)
+    legacy.execute("fund", "funding", funding(), now=HOUR)
+    assert legacy.audit()["funding_time_basis"] == "utc_hour"
 
 
 @pytest.mark.parametrize("workers", ["thread", "process"])
