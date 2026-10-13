@@ -1,6 +1,6 @@
 """Fit return baselines and assess validation without opening held-out data."""
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import json
 import logging
 import os
@@ -17,12 +17,13 @@ import sklearn
 
 from local_ai_trader.data.storage import native_path, write_json, write_parquet
 from local_ai_trader.decision.cost_aware import round_trip_factor
-from local_ai_trader.features.build_features import FEATURE_COLUMNS
+from local_ai_trader.features.build_features import FEATURE_COLUMNS, FEATURE_SCHEMA_VERSION
 from local_ai_trader.forecast.baseline import MODEL_NAMES, evaluate_return_predictions, fit_return_baselines, predict_return_checkpoint, return_targets, validate_ridge_alpha
 from local_ai_trader.forecast.split import LABEL_AVAILABLE_COLUMN, validate_execution_features
 from local_ai_trader.forecast.targets import FUTURE_COLUMNS, verify_input_hashes
 from local_ai_trader.models.train import file_digest
 from local_ai_trader.settings import Settings, load_backtest_settings, positive_integer, validate_split_fractions
+from local_ai_trader.walkforward.protocol import restore_settings
 
 LOGGER = logging.getLogger(__name__)
 ARTIFACT_NAMES = ("checkpoint.json", "metrics.json", "validation_mean.parquet", "validation_ridge.parquet")
@@ -225,8 +226,20 @@ def train_return_baseline_experiment(directory: Path, settings: Settings, ridge_
     return output, metrics
 
 
-def load_return_checkpoint(directory: Path) -> dict:
-    """Audit a complete saved run without reading original train/validation/test data."""
+@dataclass(frozen=True)
+class ReturnModelSnapshot:
+    directory: Path
+    checkpoint: dict
+    experiment: dict
+    settings: Settings
+    input_hashes: dict[Path, str]
+
+    def verify(self) -> None:
+        verify_input_hashes(self.input_hashes)
+
+
+def load_return_model_snapshot(directory: Path) -> ReturnModelSnapshot:
+    """Audit a complete saved model without reopening original datasets."""
     directory = native_path(directory.resolve())
     manifest_path = directory / "experiment.json"
     manifest_digest = file_digest(manifest_path)
@@ -251,5 +264,32 @@ def load_return_checkpoint(directory: Path) -> dict:
     for name in ("symbol", "exchange", "feature_names", "target_kind", "target_column", "return_unit"):
         if checkpoint.get(name) != experiment.get(name):
             raise ValueError(f"Return checkpoint metadata disagrees on {name}")
+    settings = restore_settings(experiment["settings"])
+    split_metadata = experiment["split_metadata"]
+    feature_metadata = split_metadata["feature_metadata"]
+    for name, expected in (
+        ("target_kind", "execution_open_to_open"), ("feature_names", list(FEATURE_COLUMNS)),
+        ("candle_seconds", settings.candle_seconds), ("holding_bars", settings.horizon_steps),
+        ("latency_bars", settings.backtest.latency_bars),
+    ):
+        _equal(split_metadata, name, expected)
+    for name in ("candle_seconds", "momentum_steps", "rolling_window"):
+        _equal(feature_metadata, name, getattr(settings, name))
+    for name, expected in (
+        ("candle_seconds", settings.candle_seconds), ("holding_bars", settings.horizon_steps),
+        ("latency_bars", settings.backtest.latency_bars), ("training_rows", experiment["training_rows"]),
+        ("training_last_label_known_at", split_metadata["partitions"]["train"]["last_label_known_at"]),
+        ("ridge_alpha", experiment["return_parameters"]["ridge_alpha"]), ("ridge_solver", "svd"),
+    ):
+        _equal(checkpoint, name, expected)
+    if checkpoint["training_rows"] != experiment["split_metadata"]["partitions"]["train"]["rows"]:
+        raise ValueError("Return training rows disagree with split provenance")
+    if experiment["split_metadata"]["feature_metadata"].get("feature_schema_version") != FEATURE_SCHEMA_VERSION:
+        raise ValueError("Unsupported return feature schema")
     verify_input_hashes(inputs)
-    return checkpoint
+    return ReturnModelSnapshot(directory, checkpoint, experiment, settings, inputs)
+
+
+def load_return_checkpoint(directory: Path) -> dict:
+    """Restore audited JSON parameters without reading original source datasets."""
+    return load_return_model_snapshot(directory).checkpoint

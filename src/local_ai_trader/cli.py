@@ -105,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
     decision_preview = commands.add_parser("decision-preview", help="Explain a cost-aware entry candidate using saved historical probabilities")
     decision_preview.add_argument("path", type=Path, help="Completed walk-forward plan directory")
     decision_preview.add_argument("--config", type=Path, default=Path("config/settings.toml"), help="Read the separate decision policy table; costs remain bound to the plan")
+    decision_preview.add_argument("--return-run", type=Path, help="Saved execution-aligned return-baseline run; performs one audited point inference")
+    decision_preview.add_argument("--return-model", choices=("mean", "ridge"), default="ridge", help="Return model within the saved run (default: ridge)")
     inspect = commands.add_parser("inspect", help="Query a Parquet dataset using DuckDB")
     inspect.add_argument("path", type=Path)
     targets = commands.add_parser("targets", help="Build causal-time-labelled forward-return targets")
@@ -177,7 +179,10 @@ def main(argv: list[str] | None = None) -> int:
         elif arguments.command == "decision-preview":
             from local_ai_trader.decision.preview import create_decision_preview
 
-            create_decision_preview(arguments.path, arguments.config)
+            if arguments.return_run is None and arguments.return_model == "ridge":
+                create_decision_preview(arguments.path, arguments.config)
+            else:
+                create_decision_preview(arguments.path, arguments.config, return_run=arguments.return_run, return_model=arguments.return_model)
         elif arguments.command == "targets":
             create_target_dataset(arguments.path, load_settings(arguments.config))
         elif arguments.command == "execution-targets":

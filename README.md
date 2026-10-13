@@ -1046,6 +1046,48 @@ trading threshold, backtest a new policy, or submit orders. A saved return model
 still needs assessment and an explicit integration into inference and the
 separate paper risk coordinator. No fresh independent strategy period is claimed.
 
+## Historical decision preview with a saved return forecaster
+
+Supply a trained return run to the existing preview command:
+
+```powershell
+& $projectPython -m local_ai_trader decision-preview data/processed/walkforward/coinbase_BTC-USD_300s_1778284800_1790640000_h6_features --return-run "data/models/return_baseline_BTC-USD_<UTC>_<id>"
+```
+
+Replace the placeholder with the actual saved run directory. `--return-model`
+defaults to `ridge`; `mean` selects the same run's training-mean control. Without
+`--return-run`, the original preview behavior is preserved. There is no option
+to type in an invented expected return.
+
+The command audits the saved classifier execution and return experiment,
+including model/metric/prediction hashes and recorded training provenance.
+Market, candle interval, holding period, execution latency, feature schema,
+momentum and rolling windows must match. It locates the final classifier signal
+in its frozen fold's feature table and projects only causal candle metadata and
+the eight feature columns into **one** return inference. Future labels are never
+inputs. The signal must occur after all return-model training labels were known.
+Classifier inference is reused; no classifier or return model is fitted again.
+Reserved return test and full return source datasets remain unopened.
+
+The preview prints expected gross return, expected net return under the frozen
+walk-forward costs, break-even gross return, required margin and the decision
+reason. Source-run diagnostic fees do not replace the classifier plan's cost
+assumptions. A forecast that fails cost coverage yields `AVOID`; a `BUY` candidate
+still requires independent risk authorization and creates no orders.
+
+An immutable report is saved under
+`execution/forecast_decision_previews/<return-manifest-hash>_<model>_<policy-hash>/`.
+It records the signal, point forecast, model and feature-source hashes, timing
+basis, policy/costs and separate risk status. The original `decision_preview`
+and all model/backtest/uncertainty bundles remain unchanged. Atomic publication
+is refused if a model, classifier source or policy config changes during preview.
+
+This is a historical flat-position explanation, not a current market instruction
+or a new strategy evaluation. The classifiers' recorded outcomes were already
+consumed by research, point forecasts supply no uncertainty interval, and a
+fresh later period plus freshness/account/risk checks remain necessary for the
+eventual paper coordinator.
+
 ## Next milestones
 
 1. Compare naive, logistic, XGBoost and MLP validation results on the predefined
