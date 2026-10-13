@@ -88,11 +88,22 @@ def create_decision_preview(client, config_path, model_directory, *, track_outco
             raise ValueError("Scanner model timing protocol disagrees")
         bindings[coin] = source_id
     # Load/infer model libraries before executable-quote freshness checks.
-    snapshot, raw, candles, features = client.snapshot()
+    snapshot, raw, candles, features = client.snapshot(allow_candle_gaps=True)
     boundary = int(datetime.fromisoformat(snapshot["created_at"]).timestamp()) // 300 * 300
     results, pending = {}, {}
     for coin in client.settings.coins:
         asset = snapshot["assets"][coin]
+        if not asset["signal_ready"]:
+            results[coin] = {"symbol": BY_COIN[coin].symbol, "coin": coin, "action": "AVOID",
+                             "decision_reason": "missing_completed_candles",
+                             "signal_gate": {"status": "BLOCK", "reason": "action_not_entry", "eligible_for_account_risk_check": False},
+                             "calibrated_up_probability": None, "calibrated_probabilities_up_down_flat": None,
+                             "expected_gross_return": None, "modeled_net_return": None, "confidence": None,
+                             "calibration_id": None, "reliability_validation_id": None, "primary_model": None,
+                             "account_risk_authorized": False, "signal_at": None, "features": None,
+                             "inference_at": None, "data_quality": asset["quality"],
+                             "underlying_units_per_contract": BY_COIN[coin].underlying_units_per_contract}
+            continue
         eligible = features[coin].loc[features[coin].available_at == pd.Timestamp(boundary-300, unit="s", tz="UTC")]
         if len(eligible) != 1:
             raise ValueError("Require exactly one causal signal with elapsed one-bar execution delay")
@@ -162,7 +173,12 @@ def create_decision_preview(client, config_path, model_directory, *, track_outco
              "net_pct": None if row["modeled_net_return"] is None else 100*row["modeled_net_return"],
              "reason": row["signal_gate"]["reason"] if row["signal_gate"]["status"] == "REVIEW" else row["decision_reason"]} for row in results.values()]
     print(pd.DataFrame(rows).to_string(index=False))
-    print("PASS: saved models inferred causal delayed signals; current quotes, modeled costs and signal gates checked")
+    complete = sum(asset["signal_ready"] for asset in snapshot["assets"].values())
+    print(f"PASS: {complete}/{len(results)} markets have complete causal inputs; current quotes, modeled costs and signal gates checked")
+    for coin, asset in snapshot["assets"].items():
+        if not asset["signal_ready"]:
+            LOGGER.warning("%s (%s): skipped; %s missing completed candles; missing UTC opens: %s. Other complete markets continue; no candle filling.",
+                           BY_COIN[coin].symbol, coin, asset["quality"]["missing_count"], ", ".join(asset["quality"]["missing_timestamps_utc"]))
     print("Preview only: independent account risk not requested; no fills; reliability unvalidated; strategy month not started")
     print(f"Saved live decision preview to {output}")
     return output, report

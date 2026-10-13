@@ -270,7 +270,13 @@ class HyperliquidPublicClient:
         payload = self.info({"type": "metaAndAssetCtxs", **({"dex": dex} if dex else {})})
         return payload, _utc(self.clock())
 
-    def snapshot(self):
+    def snapshot(self, *, allow_candle_gaps=False):
+        """Capture fresh quotes; callers may explicitly skip gap-affected signals.
+
+        The data-validation command remains strict. Scanner mode reports missing
+        intervals per market and produces no features for that entire window.
+        Malformed candles, invalid contexts and stale/future books still refuse.
+        """
         for boundary_attempt in range(2):
             now = _utc(self.clock())
             end = int(now.timestamp()) // SECONDS * SECONDS
@@ -307,11 +313,21 @@ class HyperliquidPublicClient:
                 contexts.update(parse_contexts(metadata, tuple(coins), context_receipts[key]))
             assets, frames, feature_frames = {}, {}, {}
             for coin in self.settings.coins:
-                frame, quality = parse_candles(raw[f"{coin}_candles"], coin, start, end)
+                frame, quality = clean_hyperliquid_candles(raw[f"{coin}_candles"], coin, start, end)
+                if quality.missing_count:
+                    if not allow_candle_gaps:
+                        raise ValueError(f"Hyperliquid {coin}: {quality.missing_count} missing completed candles")
+                    assets[coin] = {**contexts[coin], "quality": asdict(quality), "signal_ready": False,
+                                    "signal_unavailable_reason": "missing_completed_candles", "last_prediction_time": None,
+                                    "feature_rows": 0, "latest_features": None}
+                    frames[coin] = frame
+                    feature_frames[coin] = pd.DataFrame(columns=["available_at", *FEATURE_COLUMNS])
+                    continue
                 features = build_features(frame, SECONDS, self.settings.momentum_steps, self.settings.rolling_window)
                 if frame.available_at.iloc[-1] != pd.Timestamp(end, unit="s", tz="UTC"):
                     raise ValueError("Latest Hyperliquid completed candle is stale")
-                assets[coin] = {**contexts[coin], "quality": asdict(quality), "last_prediction_time": features.available_at.iloc[-1].isoformat(),
+                assets[coin] = {**contexts[coin], "quality": asdict(quality), "signal_ready": True,
+                                "signal_unavailable_reason": None, "last_prediction_time": features.available_at.iloc[-1].isoformat(),
                                 "feature_rows": len(features), "latest_features": {name: float(features[name].iloc[-1]) for name in FEATURE_COLUMNS}}
                 frames[coin], feature_frames[coin] = frame, features
             with ThreadPoolExecutor(max_workers=min(8, len(self.settings.coins))) as pool:

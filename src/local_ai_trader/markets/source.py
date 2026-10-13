@@ -17,7 +17,7 @@ class MarketState:
     price: float
     change_24h: float | None
     volume_24h_notional: float | None
-    momentum: float
+    momentum: float | None
     news: tuple[str, ...] | None
     regime: str
     regime_method: str
@@ -39,7 +39,7 @@ def live_market_state(market, context, book, features):
         price=book["mid"] / market.underlying_units_per_contract,
         change_24h=None if previous is None else context["mark_price"] / previous - 1,
         volume_24h_notional=context.get("day_notional_volume"),
-        momentum=features["feature_momentum"], news=None,
+        momentum=None if features is None else features["feature_momentum"], news=None,
         regime="unavailable", regime_method="no_regime_model_connected",
         underlying_units_per_contract=market.underlying_units_per_contract,
         contract_price=book["mid"],

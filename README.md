@@ -1774,3 +1774,25 @@ is invented. This runs once per scanner window and depends on successful scanner
 captures; it is not yet a continuous risk/liquidation engine. The monitor runs
 before potentially slower prospective outcome resolution. Live execution stays
 disabled, and no exchange trading credentials are needed.
+
+### Missing live candles affect only that market's signal
+
+The decision scanner treats a missing completed candle as a per-market data
+gap. For example, a HOOD gap produces `HOOD: AVOID`, reason
+`missing_completed_candles`, and an explicit list of the missing UTC candle
+opens. Other markets with complete windows continue inference and prospective
+tracking. Fresh books and mark contexts can still maintain the paused paper
+account independently of candle-based model inputs.
+
+An affected market has no features, momentum estimate, probabilities, return
+forecast or newly recorded forward prediction. Nothing is filled, interpolated
+or carried forward, and an older signal is not substituted. It resumes on a
+subsequent scanner window when the entire configured completed-candle window
+is available. Existing forecasts keep their original identity; outcomes whose
+required candles are missing remain pending while other outcomes can resolve.
+The existing model/config-bound observation and paper books are preserved.
+
+This permission to skip a signal does not relax raw candle validation, USDC
+metadata checks, quote freshness or future-time checks. Malformed data still
+refuses the capture. The separate `hyperliquid-feed` validation command retains
+its strict default and continues to report missing candles as an error.
