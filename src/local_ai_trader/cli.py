@@ -123,6 +123,9 @@ def main(argv: list[str] | None = None) -> int:
     history = commands.add_parser("hyperliquid-history", help="Prepare venue-specific causal research data and purged partitions for all configured markets")
     history.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
     history.add_argument("--bars", type=int, default=4999, help="Closed five-minute bars to request (128–4999; default: 4999)")
+    venue_train = commands.add_parser("hyperliquid-train", help="Fit all-market venue models, calibrate earlier validation and assess later validation; no test reads")
+    venue_train.add_argument("path", type=Path, help="Prepared Hyperliquid history directory")
+    venue_train.add_argument("--device", choices=("cuda", "cpu"), default="cuda", help="MLP training device; CUDA is explicit and never silently falls back")
     perp_demo = commands.add_parser("perpetual-paper-demo", help="Synthetic persisted USDC margin/funding workflow; no strategy or orders")
     perp_demo.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
     perp_status = commands.add_parser("perpetual-paper-status", help="Audit recorded USDC perpetual balances without fetching prices")
@@ -229,6 +232,10 @@ def main(argv: list[str] | None = None) -> int:
             from local_ai_trader.hyperliquid.history import prepare_hyperliquid_history
 
             prepare_hyperliquid_history(arguments.config, bars=arguments.bars)
+        elif arguments.command == "hyperliquid-train":
+            from local_ai_trader.hyperliquid.train import train_hyperliquid_models
+
+            train_hyperliquid_models(arguments.path, device=arguments.device)
         elif arguments.command == "perpetual-paper-demo":
             from local_ai_trader.paper.perpetual_demo import perpetual_demo
 

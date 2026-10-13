@@ -8,8 +8,9 @@ persistent spot-paper execution foundation.
 The current deployment target is **eight Hyperliquid perpetuals, 1× leverage,
 long only**. Its public mainnet data feed validates and archives live observations
 without a wallet key. A separate restartable USDC perpetual accounting foundation
-handles margin reservation, costs and recorded funding. Venue-bound models,
-recorded-funding integration and liquidation rules remain integration steps.
+handles margin reservation, costs and recorded funding. Venue-bound models can
+now train, calibrate and assess all eight markets in one batch. Recorded-funding
+coordination, separately validated reliability and liquidation rules remain integration steps.
 Recent Hyperliquid history can now prepare all eight markets' causal features,
 execution labels and purged research partitions in one command. Live execution is disabled.
 
@@ -1563,5 +1564,64 @@ A genuine mainnet run prepared all eight markets with 4,999 closed candles,
 eight purged labels at each earlier boundary. This prepares data without fitting
 models, estimating validated reliability, scoring a strategy or starting the
 30-day paper trial. Original Coinbase experiments remain separate. The next
-model milestone will use this venue-specific data rather than connect Coinbase
+model milestone uses this venue-specific data rather than connect Coinbase
 checkpoints to new markets.
+
+## Train and calibrate all Hyperliquid markets
+
+Use the directory printed by `hyperliquid-history`:
+
+```powershell
+& $projectPython -m local_ai_trader hyperliquid-train "data/hyperliquid/research/history_<UTC>_<id>" --device cuda
+```
+
+The batch fits training-frequency and scaled logistic controls, fixed XGBoost
+and a 30-epoch MLP, plus training-mean and scaled Ridge gross-return forecasts
+for every prepared market. Defaults reuse seed 42, logistic C=1, 200 depth-three
+XGBoost trees and a 64/32 MLP. Training is explicit: CUDA absence refuses the
+requested GPU run before publishing any batch. `--device cpu` is available for
+an explicitly chosen CPU run and automated verification. PyTorch must be present
+in the selected project interpreter.
+
+Base-model fitting and preprocessing use training rows only, without early
+stopping, validation eval sets or validation-driven hyperparameter changes.
+Logistic and Ridge parameters are saved as strict JSON; XGBoost uses its native
+JSON and MLP restoration loads tensors with `weights_only=True`. Saved inference
+reproduces native predictions without refitting and checks contract, features,
+class order, source hashes and fitting-label availability. Model probabilities
+use the explicit **up/down/flat** order; source string labels are encoded by
+name rather than reusing a different preparation order.
+
+Earlier validation fits each model's scalar temperature. Labels reaching the
+later-validation boundary are purged before fitting; all weights and temperatures
+freeze before the later assessment is predicted. A gap-free default market has
+2,979 training rows, 486 calibration rows, eight purged rows and 494 assessment
+rows. Raw/scaled class metrics and mean/Ridge return errors are reported on that
+later validation slice. Temperature fitting can worsen later metrics and is not
+a promise of calibrated future performance. Fixed primary families are BTC MLP
+and XGBoost for the other seven markets, selected before calibration/assessment;
+results never choose a favorable replacement. Missing training classes publish
+explicit family unavailability, with no substitution for the primary model.
+
+The fitting loader reads/hashes only `history.json`, its exact copied config and
+per-market train/validation Parquets. It never opens, stats or hashes reserved
+test, raw, candle or full-feature files. Source preparation's manifest establishes
+lineage; the whole-source reconstruction audit is not called during fitting.
+Training/validation schemas, gross-return labels, class boundaries, prediction
+times and partition purges are checked against the frozen protocol.
+
+Atomic `data/hyperliquid/models/models_<UTC>_<id>/` bundles contain all market
+checkpoints, native weights, temperatures, later-validation predictions, metrics,
+training history/hardware, recipe and source hashes. Output follows the history
+archive's data root, so relative paths in a copied config do not create a nested
+project. Failed fits, changed inputs and failed writes publish no partial batch.
+Native long Windows paths require no system registry changes.
+
+`predict_saved_market` provides calibrated probabilities and gross-return point
+forecasts from explicitly selected saved models on causal rows, without future
+label columns. Its calibration ID binds the checkpoint. **Confidence and its
+reliability-validation ID remain unavailable:** probability, entropy and later
+validation accuracy do not establish the separately validated 70% reliability
+measure. Otherwise eligible BUY candidates route to REVIEW through the existing
+signal gate. These are research models without demonstrated profitability; no
+orders, paper fills or forward strategy month are created by this command.
