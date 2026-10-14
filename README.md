@@ -1947,3 +1947,18 @@ qualification and an entry coordinator before a forward strategy trial. No
 exchange signing or live orders exist. The isolated simulator retains its
 100,000-USDC opening cap and unsupported partial-liquidation limits described
 above; continuous polling does not make it an exact exchange liquidation engine.
+
+To investigate a scanner that produces no BUY candidates, run
+`python -m local_ai_trader.hyperliquid.diagnostics --models MODEL_DIRECTORY --book OBSERVATIONS_SQLITE`
+using the verified project interpreter. This opens the forward book read-only,
+checks its model/config binding, and replays the saved causal features through
+the frozen classifiers, temperatures and return models. It compares raw/scaled
+UP scores with saved later-validation scores and reports training versus live
+feature medians/ranges. UP means a gross return greater than 0.2% over the fixed
+30-minute execution horizon, not any positive price change. Training inputs and
+saved assessment predictions are read; reserved test partitions remain unopened.
+These are descriptive diagnostics: range differences do not certify drift,
+overlapping rows are not independent reliability evidence, and replay accuracy
+does not establish profitability. Reliability success must mean positive net
+profit after modeled execution costs and funding. This command does not fit
+models, alter gates, approve entries or start the paper strategy month.
