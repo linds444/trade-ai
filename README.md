@@ -1962,3 +1962,50 @@ overlapping rows are not independent reliability evidence, and replay accuracy
 does not establish profitability. Reliability success must mean positive net
 profit after modeled execution costs and funding. This command does not fit
 models, alter gates, approve entries or start the paper strategy month.
+
+`hyperliquid-net-outcomes --config config/hyperliquid.toml --models MODEL_DIRECTORY --book OBSERVATIONS_SQLITE --guardian GUARDIAN_DIRECTORY --watch`
+runs a separate **prospective net-outcome observer** alongside the funding
+collector, scanner and guardian. It makes no exchange requests and never writes
+their accounts or observation books. It freezes its protocol and registers only
+forecasts from the next five-minute signal onward, before the delayed entry.
+Old forecasts cannot become new prospective evidence. The process uses the first
+timely valid guardian sample it observes in the 30 seconds after entry is due;
+both the archived source quote and local observation must satisfy that window.
+The exit follows the same rule 30 minutes after the observed entry. Stale,
+future, pre-deadline and changed-rule quotes cannot stand in for either endpoint.
+Missed windows or insufficient full-size liquidity produce unavailable outcomes,
+not retrospective fills at a later favourable price.
+
+Every forecast is a separate hypothetical 1,000-USDC long benchmark. Native
+lot rounding limits entry notional plus fees to that budget; adverse native price
+rounding includes one basis point of slippage per side. Entry uses the observed
+ask, exit uses the observed bid, and both endpoints use their own fee assumptions.
+The report separates midpoint PnL, spread, slippage/rounding, fees and signed
+funding and reconciles those components to net PnL. Success means strictly
+positive net PnL. A positive price change alone is not success. Base and HIP-3
+fee assumptions and native `kPEPE` contract units remain intact.
+
+An hourly funding interval stays pending until recorded settled rates and
+near-event oracle proxies establish the actual settlement operands. Entries in
+the first 30 seconds of an hour require that evidence to establish whether the
+event occurred while held; only `entry_at < settlement_at <= exit_at` incurs a
+cash flow. Missing rates or historical oracles are never replaced with zero or
+a current funding forecast. The proxy remains explicitly estimated. Finalized
+outcomes retain their original funding source archives; restart reconstruction
+checks quote sources, settlement operands, cost arithmetic and an append-only
+hash journal. Stable per-forecast event identities prevent duplicate observations.
+The collector refuses a missing journal in an existing run instead of resetting it.
+
+Results live separately under `data/hyperliquid/net_outcomes/<binding>/`, with
+`latest.json` containing counts for pending quotes, pending funding, unavailable
+outcomes and resolved candidates. All forecasts are observed for diagnostics;
+candidate counts separately require the frozen 60% UP probability and predicted
+net return above the existing margin at the observed entry quote. Unavailable
+and unresolved observations remain visible and cannot certify reliability.
+
+These overlapping benchmarks do not allocate a portfolio, enforce concurrent
+account exposure or simulate the intrahorizon liquidation path. Summing them is
+not paper strategy PnL. They provide prospective net-cost outcome evidence, not
+independent samples or a validated 70% reliability measure. Confidence remains
+unavailable, entries remain paused, and the profitable strategy month does not
+start. No signing keys, account resets or live activation are involved.

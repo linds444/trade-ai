@@ -20,7 +20,7 @@ from local_ai_trader.models.train import file_digest
 from local_ai_trader.paper.ledger import _hash, _iso
 
 
-def read_forecasts(path):
+def read_forecasts(path, *, signal_since=None):
     """Take a short consistent snapshot without invoking the writable book API."""
     path = native_path(Path(path)).resolve()
     # An extended Windows path's as_uri() treats '?' as a network authority.
@@ -34,13 +34,19 @@ def read_forecasts(path):
         db.execute("PRAGMA query_only=ON")
         db.execute("BEGIN")
         contract_row = db.execute("SELECT payload,digest,recorded_count,resolved_count,counters_digest FROM contract WHERE id=1").fetchone()
-        rows = db.execute("SELECT key,coin,payload,digest FROM forecasts ORDER BY key").fetchall()
+        total = db.execute("SELECT COUNT(*) FROM forecasts").fetchone()[0]
+        if signal_since is None:
+            rows = db.execute("SELECT key,coin,payload,digest FROM forecasts ORDER BY key").fetchall()
+        else:
+            from datetime import timedelta
+            rows = db.execute("SELECT key,coin,payload,digest FROM forecasts WHERE known_at>=? ORDER BY key",
+                              (_iso(signal_since + timedelta(minutes=40)),)).fetchall()
         resolved = db.execute("SELECT COUNT(*) FROM outcomes").fetchone()[0]
     if contract_row is None:
         raise ValueError("Missing forward observation contract")
     contract = json.loads(contract_row[0])
-    counts = {"recorded": len(rows), "resolved": resolved}
-    if contract_row[1] != _hash(contract) or tuple(contract_row[2:4]) != (len(rows), resolved) or contract_row[4] != _hash(counts):
+    counts = {"recorded": total, "resolved": resolved}
+    if contract_row[1] != _hash(contract) or tuple(contract_row[2:4]) != (total, resolved) or contract_row[4] != _hash(counts):
         raise ValueError("Forward contract or observation counters changed")
     if contract["class_names"] != list(CLASS_NAMES) or contract["source_mode"] != "observed":
         raise ValueError("Forward class mapping/source disagrees")

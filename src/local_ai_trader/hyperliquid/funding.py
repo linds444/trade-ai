@@ -129,9 +129,9 @@ def load_funding_capture(path):
     return observation, source_id
 
 
-def pair_recorded_funding(root, required_keys=None, *, extra_paths=()):
+def pair_recorded_funding(root, required_keys=None, *, extra_paths=(), include_provenance=False):
     root = native_path(root).resolve()
-    rates, oracles = {}, {}
+    rates, oracles, sources = {}, {}, {}
     paths = sorted(root.glob("capture_*")) if root.exists() else []
     if required_keys:
         hours = [_stamp(key.split("|", 1)[1]) for key in required_keys]
@@ -147,6 +147,7 @@ def pair_recorded_funding(root, required_keys=None, *, extra_paths=()):
     if paths:
         for path in paths:
             observation, source_id = load_funding_capture(path)
+            sources[source_id] = path
             for point in observation["rates"]:
                 key = point["coin"] + "|" + point["hour"]
                 if required_keys is not None and key not in required_keys:
@@ -172,6 +173,8 @@ def pair_recorded_funding(root, required_keys=None, *, extra_paths=()):
                       "rate": point["rate"], "oracle_price": oracle["oracle_price"], "oracle_at": oracle["at"],
                       "rate_source_id": source_id, "oracle_source_id": oracle_id, "source_mode": "observed"}
         ready[key]["rate_observed_at"] = point["available_at"]
+        if include_provenance:
+            ready[key]["source_captures"] = sorted({str(sources[sid]) for sid in (source_id, oracle_id)})
     return ready, unavailable
 
 

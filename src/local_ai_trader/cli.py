@@ -137,6 +137,12 @@ def main(argv: list[str] | None = None) -> int:
     guardian = commands.add_parser("hyperliquid-paper", help="Maintain a separate paused isolated paper book from continuous public quotes; no model inference or live orders")
     guardian.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
     guardian.add_argument("--watch", action="store_true", help="Poll fresh quotes independently of scanner until Ctrl+C")
+    net_outcomes = commands.add_parser("hyperliquid-net-outcomes", help="Observe prospective hypothetical net outcomes from existing quote/funding archives; no fills or reliability approval")
+    net_outcomes.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
+    net_outcomes.add_argument("--models", type=Path, required=True)
+    net_outcomes.add_argument("--book", type=Path, required=True, help="Existing forward observations.sqlite")
+    net_outcomes.add_argument("--guardian", type=Path, required=True, help="Existing guardian directory containing run.json and live quote captures")
+    net_outcomes.add_argument("--watch", action="store_true", help="Observe every five seconds until Ctrl+C; leave the other collectors running")
     isolated_demo = commands.add_parser("hyperliquid-isolated-demo", help="Stress-test a separate synthetic isolated book using audited archived venue rules")
     isolated_demo.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
     isolated_demo.add_argument("--venue-check", type=Path, required=True, help="Saved, audited Hyperliquid venue-check directory")
@@ -262,6 +268,10 @@ def main(argv: list[str] | None = None) -> int:
             from local_ai_trader.hyperliquid.guardian import run_paper_guardian
 
             run_paper_guardian(arguments.config, watch=arguments.watch)
+        elif arguments.command == "hyperliquid-net-outcomes":
+            from local_ai_trader.hyperliquid.net_outcomes import run_net_outcomes
+
+            run_net_outcomes(arguments.config, arguments.models, arguments.book, arguments.guardian, watch=arguments.watch)
         elif arguments.command == "hyperliquid-isolated-demo":
             from local_ai_trader.paper.isolated_demo import isolated_demo
 
