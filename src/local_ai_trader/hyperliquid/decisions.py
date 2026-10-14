@@ -89,6 +89,8 @@ def create_decision_preview(client, config_path, model_directory, *, track_outco
         bindings[coin] = source_id
     # Load/infer model libraries before executable-quote freshness checks.
     snapshot, raw, candles, features = client.snapshot(allow_candle_gaps=True)
+    from local_ai_trader.hyperliquid.venue import assess_metadata
+    venue_constraints = assess_metadata(raw, snapshot["assets"], client.settings, _utc(client.clock()))
     boundary = int(datetime.fromisoformat(snapshot["created_at"]).timestamp()) // 300 * 300
     results, pending = {}, {}
     for coin in client.settings.coins:
@@ -154,6 +156,7 @@ def create_decision_preview(client, config_path, model_directory, *, track_outco
               "exchange": "hyperliquid", "instrument": "perpetual", "currency": "USDC", "model_directory": str(model_directory),
               "model_manifest_sha256": model_digest, "input_config_sha256": config_digest, "market_snapshot": snapshot, "decisions": results,
               "entry_policy": asdict(client.settings.entry_policy), "models_fitted": False, "test_opened": False,
+              "venue_constraints": venue_constraints,
               "paper_account_created": False, "paper_fills_created": False, "orders_created": False, "forward_strategy_started": False, "live_execution_enabled": False}
     if track_outcomes:
         report["pending_forward_predictions"] = pending

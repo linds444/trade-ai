@@ -120,6 +120,8 @@ def main(argv: list[str] | None = None) -> int:
     funding = commands.add_parser("hyperliquid-funding", help="Archive settled rates and observed oracle proxies; no orders")
     funding.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
     funding.add_argument("--watch", action="store_true", help="Capture hourly oracle windows and changed funding history until Ctrl+C")
+    venue_check = commands.add_parser("hyperliquid-venue-check", help="Audit public sizing, margin modes and maintenance tiers; no entries or account changes")
+    venue_check.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
     history = commands.add_parser("hyperliquid-history", help="Prepare venue-specific causal research data and purged partitions for all configured markets")
     history.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
     history.add_argument("--bars", type=int, default=4999, help="Closed five-minute bars to request (128–4999; default: 4999)")
@@ -238,6 +240,10 @@ def main(argv: list[str] | None = None) -> int:
             from local_ai_trader.hyperliquid.history import prepare_hyperliquid_history
 
             prepare_hyperliquid_history(arguments.config, bars=arguments.bars)
+        elif arguments.command == "hyperliquid-venue-check":
+            from local_ai_trader.hyperliquid.venue import capture_venue_check
+
+            capture_venue_check(arguments.config)
         elif arguments.command == "hyperliquid-train":
             from local_ai_trader.hyperliquid.train import train_hyperliquid_models
 

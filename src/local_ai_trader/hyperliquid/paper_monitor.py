@@ -171,6 +171,7 @@ def _maintain(client, preview_path, report, preview_hash, binding, quotes, accou
               "observed_at": _utc(client.clock()).isoformat(), "source_preview": str(preview_path), "source_preview_sha256": preview_hash,
               "account_path": str(account.path), "run_binding_sha256": _hash(binding), "mark_result": marked,
               "entry_reviews": reviews, "exit_results": exits, "funding_results": funding, "funding_error": funding_error,
+              "venue_constraints": report.get("venue_constraints"),
               "account": status, "profitability_trial_started": False, "reliability_validated": False,
               "orders_created": False, "live_execution_enabled": False}
     result["receipt_sha256"] = _hash(result)

@@ -1796,3 +1796,60 @@ This permission to skip a signal does not relax raw candle validation, USDC
 metadata checks, quote freshness or future-time checks. Malformed data still
 refuses the capture. The separate `hyperliquid-feed` validation command retains
 its strict default and continues to report missing candles as an error.
+
+## Hyperliquid venue constraints and margin mathematics
+
+`hyperliquid-venue-check --config config/hyperliquid.toml` performs a one-shot
+public-mainnet audit without models, candles, accounts or signing credentials.
+Keep the funding collector and scanner running in their existing terminals.
+The checker retrieves DEX metadata/contexts and fresh books, reports native
+quantity steps, required margin modes and leverage tiers, then publishes an
+auditable `data/hyperliquid/venue_checks/check_<UTC>_<id>/` bundle. In the current
+mainnet metadata, HOOD requires isolated margin (`noCross`); the proposed paper
+venue plan therefore uses **isolated margin for all eight contracts at 1x**.
+This is a plan for the forthcoming execution adapter, without changing exchange
+settings or the frozen accounting contract of an existing paper book.
+
+The Decimal-based rules implement the documented constraints:
+
+- Size precision comes from `szDecimals`. Quantity rounding always floors and
+  never increases an allocation. `kPEPE` quantities/prices stay in contract units.
+- Fractional prices allow at most five significant figures and `6-szDecimals`
+  decimal places for perpetuals. Integer prices retain the documented exception.
+  Explicit BUY-limit rounding goes up, SELL-limit rounding goes down, and zero
+  rounded prices are refused. Submitted opening quantities/prices must already
+  satisfy precision; validation does not silently round an invalid order.
+- Opening notional must be at least 10 USDC. This opening-order check is separate
+  from reducing exits and is not used to prevent closing a small holding.
+- Margin table IDs below 50 use the documented single tier whose maximum leverage
+  equals the ID. Larger IDs require explicit tiers; the asset maximum alone is
+  insufficient. Duplicate tables, missing tiers, increasing leverage tiers and
+  mismatched asset/table maxima refuse readiness.
+- Maintenance is `notional*rate-deduction`, with `rate=1/(2*maximum_leverage)`
+  and cumulative deductions that keep tier boundaries continuous. Initial margin
+  at the planned 1x is quantity times mark price; it is not maintenance margin.
+- The isolated-long threshold calculator solves marked equity equal to tiered
+  maintenance using the tier at the solved liquidation price. Callers supply
+  isolated collateral after fees/funding. A zero result means no positive root
+  under those static inputs; subsequent costs can change the result. Cross-margin
+  sharing, partial liquidation, liquidity-dependent liquidation fills and the
+  backstop vault are not simulated by this calculator.
+
+Official references are archived as URLs in every report:
+[precision](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/tick-and-lot-size),
+[order errors/minimum](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/error-responses),
+[margin](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/margining),
+[tiers](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/margin-tiers), and
+[liquidation formula](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/liquidations).
+Raw responses, context reception times, exact config and source hashes accompany
+the derived report. Loading reconstructs the rules from those artifacts, and
+publication rechecks unchanged configuration and fresh evidence. Missing or
+unsupported evidence produces UNAVAILABLE, without inferred permissions.
+
+New scanner previews and paper-monitor receipts include the same venue-constraint
+assessment. Existing forecast/paper book identities remain unchanged. READY means
+the public contract rules were parsed; it grants no probability/reliability,
+account authorization, entry, live order or strategy-month credit. Existing
+monitors keep entries paused. The future paper execution adapter must enforce
+these rules transactionally alongside account risk, funding and validated
+reliability, and still needs liquidation-fill handling.
