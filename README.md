@@ -9,8 +9,10 @@ The current deployment target is **eight Hyperliquid perpetuals, 1× leverage,
 long only**. Its public mainnet data feed validates and archives live observations
 without a wallet key. A separate restartable USDC perpetual accounting foundation
 handles margin reservation, costs and recorded funding. Venue-bound models can
-now train, calibrate and assess all eight markets in one batch. Recorded-funding
-coordination, separately validated reliability and liquidation rules remain integration steps.
+now train, calibrate and assess all eight markets in one batch. A separate quote-driven
+paper guardian coordinates recorded funding, holding exits and bounded isolated
+liquidations. Strategy entries remain paused pending separately validated
+reliability and an entry coordinator.
 Recent Hyperliquid history can now prepare all eight markets' causal features,
 execution labels and purged research partitions in one command. Live execution is disabled.
 
@@ -1443,12 +1445,12 @@ Inspect last recorded values without fetching prices:
 & $projectPython -m local_ai_trader perpetual-paper-status "data/hyperliquid/paper/<account-directory>/account.sqlite"
 ```
 
-This foundation models conservative collateral reservation, not exact isolated
-or cross-margin liquidation mechanics. It is not yet wired to a live strategy or
-liquidation monitor, and does not start the 30-day trial. The recorded-funding
-adapter described below is available for the future coordinator.
-Venue-specific margin/liquidation rules and verified model/source adapters must
-be connected before that trial begins. Live execution remains unavailable.
+These legacy schema-1 books retain conservative collateral reservation rather
+than exact isolated or cross-margin liquidation mechanics. The schema-2 isolated
+model and continuous pretrial guardian described below provide separate books
+with venue rules and bounded liquidation handling. Recorded-funding maintenance
+is connected; reliability qualification and strategy entry execution remain
+before the forward trial. Live execution remains unavailable.
 
 ## Recorded Hyperliquid funding and oracle evidence
 
@@ -1771,7 +1773,8 @@ funding through the existing audited archive adapter. Reducing exits precede
 funding archive work, so unavailable or corrupt funding evidence cannot trap a
 holding. Missing funding stays provisional; no historical oracle or fill price
 is invented. This runs once per scanner window and depends on successful scanner
-captures; it is not yet a continuous risk/liquidation engine. The monitor runs
+captures. The independent quote-driven guardian described below supplies continuous
+pretrial risk maintenance in a separate isolated book. The scanner monitor runs
 before potentially slower prospective outcome resolution. Live execution stays
 disabled, and no exchange trading credentials are needed.
 
@@ -1889,7 +1892,58 @@ provisional.
 This model rejects opening positions above 100,000 USDC and does not implement
 partial liquidation, matching-engine queue behavior, cross margin, or automatic
 margin top-ups. It is not an exact exchange liquidation engine. These paper
-operations are transactionally journaled and restartable, but are **not yet wired
-to a continuously running live risk guardian or qualified strategy entry loop**.
-The existing scanner monitor stays entry-paused. Reliability qualification and
-the continuous coordinator remain necessary before the forward strategy trial.
+operations are transactionally journaled and restartable and connect to the
+independent quote-driven guardian described below. The existing scanner monitor
+stays entry-paused. Reliability qualification and a strategy entry coordinator
+remain necessary before the forward strategy trial.
+
+`hyperliquid-paper --config config/hyperliquid.toml --watch` runs the independent
+**continuous paper risk guardian**. Keep the settled-funding collector and model
+scanner running alongside it. The guardian calls only public metadata/context
+and order-book endpoints; it never waits for candles or model inference. Its
+polling interval is capped at ten seconds, with one HTTP attempt and a timeout
+of at most five seconds per request. All configured reads run concurrently.
+Individual failed, stale or changed-rule markets become UNAVAILABLE while fresh
+markets can continue maintenance. Stale or future quotes never authorize fills.
+
+The first successful bootstrap requires verified rules and fresh evidence for
+all configured markets. It creates a separate, observed schema-2 account under
+`data/hyperliquid/paper/guardian_<identity>/account.sqlite`, with 10,000 simulated
+USDC, frozen config/rules/risk and entries paused. It resumes that same book on
+restart, audits its journal and bootstrap evidence, and refuses missing or
+changed accounts instead of resetting balances. An identity witness outside the
+run also detects a deleted run directory. Existing synthetic and five-minute
+monitor books remain separate. A process lock prevents a second watcher from
+reaching startup replay or API acquisition while the first is running.
+
+Each cycle archives compressed public evidence before ledger mutations. Held
+positions receive fresh marks, due horizon exits and known maintenance breaches
+are handled before funding archive IO, recorded settled funding is posted, and
+newly discovered maintenance breaches can then trigger
+bounded liquidation or backstop handling. Reducing exits use actual best-bid
+size and native adverse price rounding. Each new capture permits another attempt
+if a previous exit lacked liquidity. Pending capture/receipt recovery and stable
+operation IDs prevent duplicate economic actions after an interrupted receipt
+write. Expired pending quotes cannot produce a backdated fill; a fresh capture
+is needed. Missing funding remains provisional and never traps a fresh reducing
+exit. Flat books do not accumulate empty mark events in the financial journal.
+The funding adapter can reuse the guardian's startup-audited account instead of
+replaying the full journal on every funding attempt.
+
+`latest.json` contains the most recent observed time, per-market availability,
+ledger version, equity, funding gaps, position risks and action results. Treat
+an old receipt as an old observation; it is not a continuously fresh guarantee
+if the process or disk stops. Console changes and a minute heartbeat report
+READY/DEGRADED status. If the source config is edited during a run, maintenance
+continues with the frozen settings and reports the change; restarting with the
+changed config refuses to rebind the existing account. The account directory is
+anchored beside the project config, independently of the observation-output
+setting, so editing an output path cannot silently start an empty replacement book.
+
+This is the **pretrial guardian**, not a newly qualified strategy: it never calls
+entry execution, supplies reliability confidence or starts the profitability
+month. The scanner's current decisions still require independent reliability
+qualification and an entry coordinator before a forward strategy trial. No
+exchange signing or live orders exist. The isolated simulator retains its
+100,000-USDC opening cap and unsupported partial-liquidation limits described
+above; continuous polling does not make it an exact exchange liquidation engine.

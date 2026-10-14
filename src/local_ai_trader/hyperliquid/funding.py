@@ -175,10 +175,13 @@ def pair_recorded_funding(root, required_keys=None, *, extra_paths=()):
     return ready, unavailable
 
 
-def apply_recorded_funding(account_path, archive_root, *, now=None, clock=None):
-    """Future coordinator adapter; this function never opens or closes positions."""
-    account = PerpetualPaperAccount(account_path)
-    report = account.audit()
+def apply_recorded_funding(account_path, archive_root, *, now=None, clock=None, account=None):
+    """Post owed funding; an optional startup-audited account avoids repeated replay."""
+    if account is None:
+        account = PerpetualPaperAccount(account_path)
+    elif not isinstance(account, PerpetualPaperAccount) or account.path != native_path(Path(account_path)).resolve():
+        raise ValueError("Cached funding account/path disagree")
+    report = account.status()
     if report["source_mode"] != "observed" or report["funding_time_basis"] != "exchange_event":
         raise ValueError("Recorded funding requires an observed account with actual event timing")
     if not report["missing_funding"]:
@@ -188,7 +191,7 @@ def apply_recorded_funding(account_path, archive_root, *, now=None, clock=None):
     for key in report["missing_funding"]:
         if key in ready:
             results.append(account.execute("recorded-funding:" + key, "funding", ready[key], now=now, clock=clock))
-    return results, account.audit()
+    return results, account.status()
 
 
 @contextmanager
