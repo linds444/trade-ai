@@ -4,6 +4,8 @@ This is a conservative 1x collateral reservation model, not Hyperliquid's
 liquidation engine. Trusted model/source adapters supply validated evidence.
 Funding history supplies settled rates; observed oracle proxies are explicitly
 estimates. Missing settlements make performance provisional and block entries.
+Schema-2 books add a separately bound, limited isolated liquidation simulator;
+legacy journals keep their original semantics.
 """
 
 from contextlib import closing, contextmanager
@@ -93,9 +95,10 @@ def _gaps(state, now, actual_events=False):
 def _totals(state):
     positions = state["positions"].values()
     unrealized = math.fsum(p["quantity"] * (p["mark_price"] - p["entry_fill_price"]) for p in positions)
-    margin = math.fsum(p["initial_margin"] for p in positions)
+    margin = math.fsum(p.get("isolated_collateral", p["initial_margin"]) for p in positions)
     equity = state["wallet_balance"] + unrealized
-    available = min(state["wallet_balance"], equity) - margin
+    isolated = any("isolated_collateral" in p for p in positions)
+    available = (state["wallet_balance"] if isolated else min(state["wallet_balance"], equity)) - margin
     return equity, margin, available
 
 
@@ -113,6 +116,9 @@ def _quote(quote, contract, now):
         raise ValueError("Invalid perpetual spread/fee")
     if type(quote["size_decimals"]) is not int or not 0 <= quote["size_decimals"] <= 8:
         raise ValueError("Invalid perpetual quantity precision")
+    if "isolated_venue_rules" in contract:
+        from local_ai_trader.paper.isolated import validate_quote
+        validate_quote(quote, contract)
     return quote
 
 
@@ -123,7 +129,7 @@ def _report(state, contract):
     if not math.isclose(equity - contract["initial_collateral"], realized + open_net, rel_tol=1e-10, abs_tol=1e-8):
         raise ValueError("Perpetual equity does not reconcile")
     missing = _gaps(state, _time(state["as_of"]), contract.get("funding_time_basis") == "exchange_event")
-    return {**deepcopy(state), "mode": "paper_perpetual", "currency": "USDC", "source_mode": contract["source_mode"],
+    report = {**deepcopy(state), "mode": "paper_perpetual", "currency": "USDC", "source_mode": contract["source_mode"],
             "configured_leverage": 1, "equity": equity, "reserved_initial_margin": margin,
             "available_collateral": available, "realized_net_pnl": realized, "unrealized_net_pnl": open_net,
             "missing_funding": missing, "performance_provisional": bool(missing), "reconciled": True,
@@ -131,6 +137,18 @@ def _report(state, contract):
             "funding_time_basis": contract.get("funding_time_basis", "utc_hour"),
             "fill_count": len(state["trades"]) * 2 + len(state["positions"]),
             "live_execution_enabled": False, "liquidation_simulated": False}
+    if "isolated_venue_rules" in contract:
+        from local_ai_trader.paper.isolated import MODEL, position_risk, rules_for
+        report.update(margin_mode="isolated", isolated_model=MODEL,
+                      reserved_initial_margin=math.fsum(p["initial_margin"] for p in state["positions"].values()),
+                      reserved_isolated_collateral=margin,
+                      position_risks={coin: position_risk(p, rules_for(contract, coin)) for coin, p in state["positions"].items()},
+                      fill_count=sum(1 if t.get("exit_reason") == "isolated_backstop" else 2 for t in state["trades"]) + len(state["positions"]),
+                      backstop_transfers=sum(t.get("exit_reason") == "isolated_backstop" for t in state["trades"]),
+                      liquidation_simulated=True, partial_liquidation_supported=False)
+        pending = [coin for coin, risk in report["position_risks"].items() if risk["maintenance_breached"]]
+        report.update(liquidation_pending=pending, performance_provisional=bool(missing or pending))
+    return report
 
 
 def _reduce(state, contract, event):
@@ -145,7 +163,8 @@ def _reduce(state, contract, event):
         state["day"] = _iso(now)[:10]
     state["as_of"] = _iso(now)
     result = {"status": "blocked", "reason": "unsupported_operation"}
-    if kind in ("entry", "exit"):
+    isolated = "isolated_venue_rules" in contract
+    if kind in ("entry", "exit", "liquidation"):
         quote = _quote(inputs["quote"], contract, now)
         coin, mid = quote["coin"], quote["bid"] + (quote["ask"] - quote["bid"]) / 2
     if kind == "mark":
@@ -189,6 +208,14 @@ def _reduce(state, contract, event):
                 if position["coin"] == coin and _time(position["entry_at"]) < settlement_at <= _time(position.get("exit_at", _iso(now))):
                     flow = -position["quantity"] * oracle * rate
                     position["funding_cash_flow"] += flow
+                    if isolated:
+                        position["isolated_collateral"] += flow
+                    # A backstop transfer forfeits the position's entire escrow.
+                    # Late evidence changes that escrow and its transfer equally;
+                    # it must not charge another position's free collateral.
+                    if position.get("exit_reason") == "isolated_backstop":
+                        position["backstop_collateral_transfer"] += flow
+                        continue
                     amount += flow
                     if "exit_at" in position:
                         position["net_pnl"] += flow
@@ -208,13 +235,27 @@ def _reduce(state, contract, event):
         if expected <= -1:
             raise ValueError("Gross long return forecast must exceed -100%")
         fill_price = quote["ask"] * (1 + contract["slippage_bps"] / 10000)
+        if isolated:
+            from local_ai_trader.paper.isolated import fill_price as venue_fill, rules_for, MAX_NOTIONAL
+            from local_ai_trader.hyperliquid.venue import validate_entry_order
+            fill_price = venue_fill(quote, contract, "BUY")
+            validate_entry_order(quantity, fill_price, quote["mark"], rules_for(contract, coin))
+            ask_size = _number(inputs.get("ask_size", 0))
+            if ask_size < 0:
+                raise ValueError("Ask liquidity cannot be negative")
+            if quantity * max(fill_price, quote["mark"]) > MAX_NOTIONAL:
+                raise ValueError("Isolated paper model supports at most 100000 USDC per position")
         fee = quantity * fill_price * quote["fee_bps"] / 10000
-        margin = quantity * fill_price
+        margin = quantity * (max(fill_price, quote["mark"]) if isolated else fill_price)
         impact = quantity * (fill_price - mid)
         equity, reserved, available = _totals(state)
         projected = equity - fee + quantity * (quote["mark"] - fill_price)
         funding_estimate = inputs.get("expected_funding_cost_fraction")
         modeled_net = modeled_entry_net_return(quote, expected, contract["slippage_bps"], funding_estimate)
+        if isolated:
+            from local_ai_trader.hyperliquid.venue import round_price, number
+            exit_estimate = float(round_price(number(quote["bid"]) * (1 - number(contract["slippage_bps"]) / 10000) * (1 + number(expected)), rules_for(contract, coin), side="SELL"))
+            modeled_net = (exit_estimate * (1 - quote["fee_bps"] / 10000) - fill_price * (1 + quote["fee_bps"] / 10000)) / fill_price - (funding_estimate or 0)
         for value in (margin, fee, impact, projected, modeled_net):
             _number(value)
         exposure = math.fsum(p["quantity"] * p["mark_price"] for p in state["positions"].values())
@@ -224,7 +265,12 @@ def _reduce(state, contract, event):
         elif funding_estimate is None:
             result = {"status": "review", "reason": "funding_cost_estimate_unavailable"}
         else:
+            if isolated:
+                from local_ai_trader.paper.isolated import position_risk
+                unsafe_isolated = any(position_risk(p, rules_for(contract, c))["maintenance_breached"] for c, p in state["positions"].items())
             checks = [
+                (isolated and unsafe_isolated, "isolated_maintenance_breach"),
+                (isolated and ask_size < quantity, "insufficient_full_size_ask_liquidity"),
                 (not state["entries_enabled"], "new_entries_paused"),
                 (coin in state["positions"], "position_already_open"),
                 (signal.timestamp() % 300 != 0 or not 300 <= age < 600 or _time(quote["at"]) < signal + timedelta(minutes=5), "invalid_or_stale_signal"),
@@ -249,13 +295,18 @@ def _reduce(state, contract, event):
                             "entry_reference_price": mid, "entry_fill_price": fill_price, "entry_fee": fee,
                             "entry_impact_cost": impact, "initial_margin": margin, "mark_price": quote["mark"],
                             "marked_at": quote["at"], "funding_cash_flow": 0.0}
+                if isolated:
+                    position["isolated_collateral"] = margin
                 state["wallet_balance"] -= fee
                 state["positions"][coin] = position
                 result["fill"] = {"side": "BUY", "coin": coin, "quantity": quantity, "price": fill_price, "fee": fee, "reserved_margin": margin}
-    elif kind == "exit":
+    elif kind in ("exit", "liquidation"):
         position = state["positions"].get(coin)
-        reason = inputs["reason"]
-        if reason not in ("horizon", "risk", "policy_sell", "manual"):
+        reason = inputs.get("reason") if kind == "exit" else "isolated_liquidation"
+        if kind == "liquidation" and not isolated:
+            raise ValueError("Liquidation handling requires an isolated venue-bound book")
+        allowed_reasons = ("horizon", "risk", "policy_sell", "manual") if kind == "exit" else ("isolated_liquidation",)
+        if reason not in allowed_reasons:
             raise ValueError("Invalid perpetual exit reason")
         if position is None:
             result = {"status": "blocked", "reason": "position_unavailable"}
@@ -264,22 +315,54 @@ def _reduce(state, contract, event):
         elif reason == "horizon" and (_time(quote["at"]) < _time(position["exit_due_at"]) or now < _time(position["exit_due_at"])):
             result = {"status": "blocked", "reason": "exit_not_due"}
         else:
-            fill_price = quote["bid"] * (1 - contract["slippage_bps"] / 10000)
-            fee = position["quantity"] * fill_price * quote["fee_bps"] / 10000
-            actual_gross = position["quantity"] * (fill_price - position["entry_fill_price"])
-            state["wallet_balance"] += actual_gross - fee
-            trade = {**position, "exit_at": _iso(now), "exit_fill_price": fill_price,
-                     "gross_pnl": position["quantity"] * (mid - position["entry_reference_price"]),
-                     "fees": position["entry_fee"] + fee,
-                     "price_impact_cost": position["entry_impact_cost"] + position["quantity"] * (mid - fill_price),
-                     "net_pnl": actual_gross - position["entry_fee"] - fee + position["funding_cash_flow"]}
-            state["trades"].append(trade)
-            del state["positions"][coin]
-            result = {"status": "filled", "reason": reason, "trade": deepcopy(trade),
-                      "fill": {"side": "SELL", "coin": coin, "quantity": position["quantity"], "price": fill_price, "fee": fee}}
+            supported, failure, risk_state = True, None, None
+            if isolated:
+                from local_ai_trader.paper.isolated import book_exit_supported, position_risk, rules_for
+                position.update(mark_price=quote["mark"], marked_at=quote["at"])
+                risk_state = position_risk(position, rules_for(contract, coin))
+                supported, failure = book_exit_supported(position, quote, contract, inputs)
+                if kind == "liquidation" and not risk_state["maintenance_breached"]:
+                    supported, failure = False, "maintenance_not_breached"
+                if risk_state["maintenance_breached"]:
+                    state["entries_enabled"] = False
+            if not supported:
+                result = {"status": "blocked", "reason": failure}
+                if risk_state and risk_state["below_backstop_threshold"] and failure not in ("partial_liquidation_model_unavailable", "bid_liquidity_unavailable"):
+                    transfer = position["isolated_collateral"]
+                    state["wallet_balance"] -= transfer
+                    trade = {**position, "exit_at": _iso(now), "exit_reason": "isolated_backstop",
+                             "exit_fill_price": None, "backstop_collateral_transfer": transfer,
+                             "fees": position["entry_fee"],
+                             "net_pnl": -position["initial_margin"] - position["entry_fee"]}
+                    state["trades"].append(trade)
+                    del state["positions"][coin]
+                    result = {"status": "transferred", "reason": "isolated_backstop", "trade": deepcopy(trade)}
+            else:
+                fill_price = quote["bid"] * (1 - contract["slippage_bps"] / 10000)
+                if isolated:
+                    from local_ai_trader.paper.isolated import fill_price as venue_fill
+                    fill_price = venue_fill(quote, contract, "SELL")
+                fee = position["quantity"] * fill_price * quote["fee_bps"] / 10000
+                actual_gross = position["quantity"] * (fill_price - position["entry_fill_price"])
+                state["wallet_balance"] += actual_gross - fee
+                trade = {**position, "exit_at": _iso(now), "exit_fill_price": fill_price,
+                         "gross_pnl": position["quantity"] * (mid - position["entry_reference_price"]),
+                         "fees": position["entry_fee"] + fee,
+                         "price_impact_cost": position["entry_impact_cost"] + position["quantity"] * (mid - fill_price),
+                         "net_pnl": actual_gross - position["entry_fee"] - fee + position["funding_cash_flow"]}
+                if isolated:
+                    trade["exit_reason"] = reason
+                state["trades"].append(trade)
+                del state["positions"][coin]
+                result = {"status": "filled", "reason": reason, "trade": deepcopy(trade),
+                          "fill": {"side": "SELL", "coin": coin, "quantity": position["quantity"], "price": fill_price, "fee": fee}}
     else:
         if kind not in ("mark", "funding", "pause"):
             raise ValueError("Unsupported perpetual operation")
+    if isolated:
+        from local_ai_trader.paper.isolated import position_risk, rules_for
+        if any(position_risk(p, rules_for(contract, c))["maintenance_breached"] for c, p in state["positions"].items()):
+            state["entries_enabled"] = False
     equity, _, _ = _totals(state)
     if not all(math.isfinite(value) for value in (equity, state["wallet_balance"])):
         raise ValueError("Nonfinite perpetual balances")
@@ -311,7 +394,7 @@ class PerpetualPaperAccount:
     @classmethod
     def create(cls, path, *, coins=tuple(BY_COIN), initial_collateral=10000.0,
                policy=EntryPolicy(), slippage_bps=1.0, source_mode="synthetic", now=None,
-               run_binding=None, entries_enabled=True):
+               run_binding=None, entries_enabled=True, venue_rules=None):
         initial_collateral = _number(initial_collateral, positive=True)
         slippage_bps = _number(slippage_bps)
         if not 0 <= slippage_bps < 10000 or source_mode not in ("synthetic", "observed"):
@@ -326,6 +409,15 @@ class PerpetualPaperAccount:
                     "coins": list(coins), "initial_collateral": initial_collateral, "slippage_bps": slippage_bps,
                     "source_mode": source_mode, "created_at": _iso(now), "entry_policy": asdict(policy), "risk": dict(RISK_LIMITS),
                     "funding_time_basis": "exchange_event"}
+        if venue_rules is not None:
+            from local_ai_trader.paper.isolated import encode_rules, MODEL
+            if not isinstance(venue_rules, dict) or set(venue_rules) != set(coins):
+                raise ValueError("Require venue rules for every isolated account market")
+            contract["isolated_venue_rules"] = {coin: encode_rules(venue_rules[coin]) for coin in coins}
+            if any(value["coin"] != coin for coin, value in contract["isolated_venue_rules"].items()):
+                raise ValueError("Venue rule identifiers disagree with account markets")
+            contract["isolated_model"] = MODEL
+            contract["schema_version"] = 2
         if type(entries_enabled) is not bool:
             raise ValueError("Initial entry switch must be boolean")
         if not entries_enabled:
@@ -369,10 +461,19 @@ class PerpetualPaperAccount:
         if row is None:
             raise ValueError("Perpetual account metadata is missing")
         contract, state = json.loads(row["contract"]), json.loads(row["state"])
-        if _hash(contract) != row["contract_hash"] or _hash(state) != row["state_hash"] or contract.get("mode") != "paper_perpetual" or contract.get("currency") != "USDC" or type(contract.get("schema_version")) is not int or contract["schema_version"] != 1 or type(contract.get("leverage")) is not int or contract["leverage"] != 1:
+        if _hash(contract) != row["contract_hash"] or _hash(state) != row["state_hash"] or contract.get("mode") != "paper_perpetual" or contract.get("currency") != "USDC" or type(contract.get("schema_version")) is not int or contract["schema_version"] not in (1, 2) or type(contract.get("leverage")) is not int or contract["leverage"] != 1:
             raise ValueError("Perpetual account contract/state changed")
         if contract.get("source_mode") not in ("observed", "synthetic") or contract.get("risk") != RISK_LIMITS:
             raise ValueError("Unsupported perpetual source/risk contract")
+        if contract["schema_version"] == 2:
+            from local_ai_trader.paper.isolated import MODEL, rules_for
+            if contract.get("isolated_model") != MODEL or set(contract.get("isolated_venue_rules", {})) != set(contract["coins"]):
+                raise ValueError("Unsupported isolated paper contract")
+            for coin in contract["coins"]:
+                if rules_for(contract, coin).coin != coin:
+                    raise ValueError("Isolated venue rule identifier changed")
+        elif "isolated_venue_rules" in contract or "isolated_model" in contract:
+            raise ValueError("Legacy paper books cannot change margin models")
         head = db.execute("SELECT * FROM events ORDER BY sequence DESC LIMIT 1").fetchone()
         if head is not None:
             self._event_integrity(head)
@@ -442,6 +543,6 @@ class PerpetualPaperAccount:
             commit_at = _utc(clock()) if clock is not None else at if now is not None else datetime.now(timezone.utc)
             if not 0 <= (commit_at - at).total_seconds() < 5:
                 raise ValueError("Perpetual operation expired before commit")
-            for quote in ([inputs["quote"]] if kind in ("entry", "exit") else inputs.get("quotes", [])):
+            for quote in ([inputs["quote"]] if kind in ("entry", "exit", "liquidation") else inputs.get("quotes", [])):
                 _quote(quote, contract, commit_at)
             return {**result, "replayed": False}

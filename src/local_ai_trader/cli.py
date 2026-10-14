@@ -134,6 +134,9 @@ def main(argv: list[str] | None = None) -> int:
     decisions.add_argument("--watch", action="store_true", help="Archive one fresh decision preview per five-minute window until Ctrl+C")
     decisions.add_argument("--track-outcomes", action="store_true", help="Record current predictions before future entry, resolve outcomes after 40 minutes; no fills")
     decisions.add_argument("--paper-monitor", action="store_true", help="Maintain an observed USDC paper book and entry-skip journal; entries paused, no trial or orders")
+    isolated_demo = commands.add_parser("hyperliquid-isolated-demo", help="Stress-test a separate synthetic isolated book using audited archived venue rules")
+    isolated_demo.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
+    isolated_demo.add_argument("--venue-check", type=Path, required=True, help="Saved, audited Hyperliquid venue-check directory")
     perp_demo = commands.add_parser("perpetual-paper-demo", help="Synthetic persisted USDC margin/funding workflow; no strategy or orders")
     perp_demo.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
     perp_status = commands.add_parser("perpetual-paper-status", help="Audit recorded USDC perpetual balances without fetching prices")
@@ -252,6 +255,10 @@ def main(argv: list[str] | None = None) -> int:
             from local_ai_trader.hyperliquid.decisions import run_decision_scanner
 
             run_decision_scanner(arguments.config, arguments.models, watch=arguments.watch, track_outcomes=arguments.track_outcomes, paper_monitor=arguments.paper_monitor)
+        elif arguments.command == "hyperliquid-isolated-demo":
+            from local_ai_trader.paper.isolated_demo import isolated_demo
+
+            isolated_demo(arguments.config, arguments.venue_check)
         elif arguments.command == "perpetual-paper-demo":
             from local_ai_trader.paper.perpetual_demo import perpetual_demo
 

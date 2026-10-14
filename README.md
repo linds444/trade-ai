@@ -1853,3 +1853,43 @@ account authorization, entry, live order or strategy-month credit. Existing
 monitors keep entries paused. The future paper execution adapter must enforce
 these rules transactionally alongside account risk, funding and validated
 reliability, and still needs liquidation-fill handling.
+
+`hyperliquid-isolated-demo --config config/hyperliquid.toml --venue-check <saved-check-directory>`
+now exercises a **separate synthetic isolated-margin account** using the audited
+rules in an archived venue check. Archived rules are inputs to this controlled
+test; they are not a claim of current venue readiness. It opens two invented
+positions, posts invented extreme funding, closes one through a sufficiently
+large synthetic bid, transfers the other's escrow through a modeled backstop,
+and reopens/replays the journal. No observed monitor account is migrated or
+unpaused, no trading key is needed, and this does not start the strategy month.
+
+New schema-2 perpetual books bind native venue rules at creation. Entries check
+price ticks, contract quantity precision, the 10-USDC opening minimum, full-size
+ask liquidity and 1x initial margin at least as large as mark notional. Entry
+fees come from free wallet cash; funding changes wallet cash and the affected
+position's escrow equally. Unrealized gains and funding credits stay allocated
+to that position. The account retains the 60% probability / independently
+validated 70% reliability gate, five-position ceiling, exposure, drawdown,
+daily-loss and cost-coverage checks. Historical schema-1 books retain their
+original accounting and replay results.
+
+The **bounded liquidation simulator** uses each position's isolated equity and
+its bound maintenance tiers, independently of unrelated wallet collateral.
+Maintenance breaches pause entries. A full reducing exit requires a fresh quote
+and enough best-bid quantity; the opening minimum never blocks a dust exit.
+The modeled fill is rounded adversely to a valid venue price and cannot consume
+another position's escrow or free cash. When a full book exit fails and isolated
+equity is strictly below two thirds of maintenance, a simplified backstop
+transfers that position and its remaining escrow. This is a transfer, not a
+fictional SELL fill or extra clearance fee. Late funding evidence adjusts the
+transferred escrow without charging free cash twice. Missing depth remains
+unknown and cannot authorize a transfer; an unresolved breach keeps performance
+provisional.
+
+This model rejects opening positions above 100,000 USDC and does not implement
+partial liquidation, matching-engine queue behavior, cross margin, or automatic
+margin top-ups. It is not an exact exchange liquidation engine. These paper
+operations are transactionally journaled and restartable, but are **not yet wired
+to a continuously running live risk guardian or qualified strategy entry loop**.
+The existing scanner monitor stays entry-paused. Reliability qualification and
+the continuous coordinator remain necessary before the forward strategy trial.
