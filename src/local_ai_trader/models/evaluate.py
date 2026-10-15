@@ -33,9 +33,28 @@ def evaluate_probabilities(labels, probabilities: np.ndarray, bins: int = 10) ->
             "mean_max_probability": average, "accuracy": accuracy,
         })
     auc = {}
+    classwise_bins = {}
+    classwise_ece = {}
     for index, name in enumerate(CLASS_NAMES):
         binary = encoded == index
         auc[name] = float(roc_auc_score(binary, values[:, index])) if binary.any() and not binary.all() else None
+        probability = values[:, index]
+        assignments = np.minimum((probability * bins).astype(int), bins - 1)
+        reliability = []
+        error = 0.0
+        for bucket in range(bins):
+            selected = assignments == bucket
+            count = int(selected.sum())
+            average = float(probability[selected].mean()) if count else None
+            frequency = float(binary[selected].mean()) if count else None
+            if count:
+                error += count / len(encoded) * abs(average - frequency)
+            reliability.append({
+                "lower": bucket / bins, "upper": (bucket + 1) / bins, "count": count,
+                "mean_probability": average, "observed_frequency": frequency,
+            })
+        classwise_bins[name] = reliability
+        classwise_ece[name] = float(error)
     return {
         "rows": len(encoded), "accuracy": float(accuracy_score(encoded, predicted)),
         "precision_macro": float(report["macro avg"]["precision"]),
@@ -46,6 +65,8 @@ def evaluate_probabilities(labels, probabilities: np.ndarray, bins: int = 10) ->
         "brier_convention": "mean sum of squared errors over all three classes; range 0 to 2",
         "ece": float(ece), "ece_convention": "top-label confidence, equal-width bins; final bin includes 1",
         "calibration_bins": calibration, "roc_auc_ovr_per_class": auc,
+        "classwise_calibration_bins": classwise_bins, "classwise_ece": classwise_ece,
+        "classwise_ece_macro": float(np.mean(list(classwise_ece.values()))),
         "roc_auc_ovr_macro": float(np.mean(list(auc.values()))) if all(value is not None for value in auc.values()) else None,
         "calibration_status": "uncalibrated",
     }

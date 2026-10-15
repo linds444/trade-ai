@@ -5,6 +5,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import logging
 from pathlib import Path
+import sqlite3
 
 import duckdb
 
@@ -88,11 +89,84 @@ def main(argv: list[str] | None = None) -> int:
     download.add_argument("--start", help="Inclusive, timezone-aware and interval-aligned")
     download.add_argument("--end", help="Exclusive, timezone-aware and interval-aligned")
     download.add_argument("--symbols", nargs="+", help="Override configured Coinbase products")
+    reprocess = commands.add_parser("reprocess", help="Build a complete subrange from saved raw responses without downloading")
+    reprocess.add_argument("path", type=Path, help="Original raw download JSON")
+    reprocess.add_argument("--start", required=True, help="Inclusive, timezone-aware and interval-aligned")
+    reprocess.add_argument("--end", required=True, help="Exclusive, timezone-aware and interval-aligned")
+    reprocess.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    walkforward = commands.add_parser("walkforward-plan", help="Freeze rolling calendar folds before model fitting")
+    walkforward.add_argument("path", type=Path, help="Feature Parquet with metadata")
+    walkforward.add_argument("--model", required=True, choices=("mlp", "xgboost"), help="Selected family; naive/logistic controls are recorded too")
+    walkforward.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    walkforward_run = commands.add_parser("walkforward-run", help="Execute frozen folds with fresh models, calibration and cost-aware evaluation")
+    walkforward_run.add_argument("path", type=Path, help="Directory containing immutable plan.json")
+    walkforward_run.add_argument("--resume", action="store_true", help="Verify and reuse completed bundles after interruption")
+    uncertainty = commands.add_parser("uncertainty", help="Audit entropy and model disagreement in saved walk-forward predictions")
+    uncertainty.add_argument("path", type=Path, help="Directory containing a completed immutable walk-forward plan")
+    decision_preview = commands.add_parser("decision-preview", help="Explain a cost-aware entry candidate using saved historical probabilities")
+    decision_preview.add_argument("path", type=Path, help="Completed walk-forward plan directory")
+    decision_preview.add_argument("--config", type=Path, default=Path("config/settings.toml"), help="Read the separate decision policy table; costs remain bound to the plan")
+    decision_preview.add_argument("--return-run", type=Path, help="Saved execution-aligned return-baseline run; performs one audited point inference")
+    decision_preview.add_argument("--return-model", choices=("mean", "ridge"), default="ridge", help="Return model within the saved run (default: ridge)")
+    paper_risk = commands.add_parser("paper-risk-demo", help="Exercise independent entry checks using synthetic inputs; no orders")
+    paper_risk.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    paper_demo = commands.add_parser("paper-demo", help="Persist a synthetic paper buy/exit and verify restart; no broker connection")
+    paper_demo.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    paper_status = commands.add_parser("paper-status", help="Audit an existing paper SQLite account without fetching prices")
+    paper_status.add_argument("path", type=Path, help="Path to account.sqlite")
+    hyperliquid = commands.add_parser("hyperliquid-feed", help="Validate public Hyperliquid mainnet books and completed candles; no trading")
+    hyperliquid.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
+    hyperliquid.add_argument("--watch", action="store_true", help="Save each new completed 5-minute window until Ctrl+C")
+    funding = commands.add_parser("hyperliquid-funding", help="Archive settled rates and observed oracle proxies; no orders")
+    funding.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
+    funding.add_argument("--watch", action="store_true", help="Capture hourly oracle windows and changed funding history until Ctrl+C")
+    venue_check = commands.add_parser("hyperliquid-venue-check", help="Audit public sizing, margin modes and maintenance tiers; no entries or account changes")
+    venue_check.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
+    history = commands.add_parser("hyperliquid-history", help="Prepare venue-specific causal research data and purged partitions for all configured markets")
+    history.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
+    history.add_argument("--bars", type=int, default=4999, help="Closed five-minute bars to request (128–4999; default: 4999)")
+    venue_train = commands.add_parser("hyperliquid-train", help="Fit all-market venue models, calibrate earlier validation and assess later validation; no test reads")
+    venue_train.add_argument("path", type=Path, help="Prepared Hyperliquid history directory")
+    venue_train.add_argument("--device", choices=("cuda", "cpu"), default="cuda", help="MLP training device; CUDA is explicit and never silently falls back")
+    decisions = commands.add_parser("hyperliquid-decisions", help="Infer delayed live previews; optional forecast tracking and paused paper monitor; no orders")
+    decisions.add_argument("--models", type=Path, required=True, help="Saved Hyperliquid model batch directory")
+    decisions.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
+    decisions.add_argument("--watch", action="store_true", help="Archive one fresh decision preview per five-minute window until Ctrl+C")
+    decisions.add_argument("--track-outcomes", action="store_true", help="Record current predictions before future entry, resolve outcomes after 40 minutes; no fills")
+    decisions.add_argument("--paper-monitor", action="store_true", help="Maintain an observed USDC paper book and entry-skip journal; entries paused, no trial or orders")
+    guardian = commands.add_parser("hyperliquid-paper", help="Maintain a separate paused isolated paper book from continuous public quotes; no model inference or live orders")
+    guardian.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
+    guardian.add_argument("--watch", action="store_true", help="Poll fresh quotes independently of scanner until Ctrl+C")
+    net_outcomes = commands.add_parser("hyperliquid-net-outcomes", help="Observe prospective hypothetical net outcomes from existing quote/funding archives; no fills or reliability approval")
+    net_outcomes.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
+    net_outcomes.add_argument("--models", type=Path, required=True)
+    net_outcomes.add_argument("--book", type=Path, required=True, help="Existing forward observations.sqlite")
+    net_outcomes.add_argument("--guardian", type=Path, required=True, help="Existing guardian directory containing run.json and live quote captures")
+    net_outcomes.add_argument("--watch", action="store_true", help="Observe every five seconds until Ctrl+C; leave the other collectors running")
+    isolated_demo = commands.add_parser("hyperliquid-isolated-demo", help="Stress-test a separate synthetic isolated book using audited archived venue rules")
+    isolated_demo.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
+    isolated_demo.add_argument("--venue-check", type=Path, required=True, help="Saved, audited Hyperliquid venue-check directory")
+    perp_demo = commands.add_parser("perpetual-paper-demo", help="Synthetic persisted USDC margin/funding workflow; no strategy or orders")
+    perp_demo.add_argument("--config", type=Path, default=Path("config/hyperliquid.toml"))
+    perp_status = commands.add_parser("perpetual-paper-status", help="Audit recorded USDC perpetual balances without fetching prices")
+    perp_status.add_argument("path", type=Path)
     inspect = commands.add_parser("inspect", help="Query a Parquet dataset using DuckDB")
     inspect.add_argument("path", type=Path)
     targets = commands.add_parser("targets", help="Build causal-time-labelled forward-return targets")
     targets.add_argument("path", type=Path, help="Original candle Parquet file")
     targets.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    execution_targets = commands.add_parser("execution-targets", help="Build delayed-entry open-to-open labels for a return forecaster")
+    execution_targets.add_argument("path", type=Path, help="Original complete candle Parquet")
+    execution_targets.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    execution_features = commands.add_parser("execution-features", help="Build causal features from an audited execution target bundle")
+    execution_features.add_argument("path", type=Path, help="Directory containing labels.parquet and targets.json")
+    execution_features.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    execution_split = commands.add_parser("execution-split", help="Create chronological return partitions purged by execution label availability")
+    execution_split.add_argument("path", type=Path, help="Directory containing features.parquet and features.json")
+    execution_split.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    return_baseline = commands.add_parser("return-baseline", help="Fit training-mean and scaled Ridge return forecasts; assess validation only")
+    return_baseline.add_argument("path", type=Path, help="Directory containing execution splits and split.json")
+    return_baseline.add_argument("--config", type=Path, default=Path("config/settings.toml"))
     features = commands.add_parser("features", help="Build trailing features from a labelled dataset")
     features.add_argument("path", type=Path, help="Labelled target Parquet file")
     features.add_argument("--config", type=Path, default=Path("config/settings.toml"))
@@ -108,22 +182,131 @@ def main(argv: list[str] | None = None) -> int:
     mlp = commands.add_parser("mlp", help="Train a small PyTorch MLP; evaluate validation only")
     mlp.add_argument("path", type=Path, help="Directory containing purged splits and split.json")
     mlp.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    calibrate = commands.add_parser("calibrate", help="Fit temperature on earlier validation; assess later validation")
+    calibrate.add_argument("path", type=Path, help="Saved model experiment directory")
+    calibrate.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    calibrate.add_argument("--splits", type=Path, help="Override split location while verifying original input hashes")
     evaluate = commands.add_parser("evaluate", help="Evaluate a frozen baseline run on its held-out test data")
     evaluate.add_argument("path", type=Path, help="Saved baseline experiment directory")
     evaluate.add_argument("--splits", type=Path, help="Override split location while verifying original input hashes")
+    evaluate.add_argument("--calibrated", action="store_true", help="Report raw and saved-temperature predictions without fitting")
+    backtest = commands.add_parser("backtest", help="Simulate a frozen model on later validation only, with costs")
+    backtest.add_argument("path", type=Path, help="Saved experiment with a calibration bundle")
+    backtest.add_argument("--model", required=True, choices=("naive", "logistic", "xgboost", "mlp"))
+    backtest.add_argument("--variant", choices=("raw", "temperature"), default="temperature")
+    backtest.add_argument("--config", type=Path, default=Path("config/settings.toml"))
+    backtest.add_argument("--splits", type=Path, help="Override split location while verifying original input hashes")
     arguments = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
         if arguments.command == "download":
             collect(arguments.config, arguments.start, arguments.end, arguments.symbols)
+        elif arguments.command == "reprocess":
+            from local_ai_trader.data.reprocess import reprocess_download
+
+            settings = load_settings(arguments.config)
+            first, last = range_bounds(arguments.start, arguments.end, settings.candle_seconds, settings.lookback_days)
+            reprocess_download(arguments.path, first, last, settings)
+        elif arguments.command == "walkforward-plan":
+            from local_ai_trader.walkforward.plan import create_walkforward_plan
+
+            create_walkforward_plan(arguments.path, load_settings(arguments.config), arguments.model)
+        elif arguments.command == "walkforward-run":
+            from local_ai_trader.walkforward.run import run_walkforward
+
+            run_walkforward(arguments.path, resume=arguments.resume)
+        elif arguments.command == "uncertainty":
+            from local_ai_trader.uncertainty.report import create_uncertainty_report
+
+            create_uncertainty_report(arguments.path)
+        elif arguments.command == "decision-preview":
+            from local_ai_trader.decision.preview import create_decision_preview
+
+            if arguments.return_run is None and arguments.return_model == "ridge":
+                create_decision_preview(arguments.path, arguments.config)
+            else:
+                create_decision_preview(arguments.path, arguments.config, return_run=arguments.return_run, return_model=arguments.return_model)
         elif arguments.command == "targets":
             create_target_dataset(arguments.path, load_settings(arguments.config))
+        elif arguments.command == "paper-risk-demo":
+            from local_ai_trader.risk.demo import paper_risk_demo
+
+            paper_risk_demo(arguments.config)
+        elif arguments.command == "paper-demo":
+            from local_ai_trader.paper.demo import paper_demo
+
+            paper_demo(arguments.config)
+        elif arguments.command == "paper-status":
+            from local_ai_trader.paper.demo import paper_status
+
+            paper_status(arguments.path)
+        elif arguments.command == "hyperliquid-feed":
+            from local_ai_trader.hyperliquid.feed import run_hyperliquid_feed
+
+            run_hyperliquid_feed(arguments.config, watch=arguments.watch)
+        elif arguments.command == "hyperliquid-funding":
+            from local_ai_trader.hyperliquid.funding import run_funding_collector
+
+            run_funding_collector(arguments.config, watch=arguments.watch)
+        elif arguments.command == "hyperliquid-history":
+            from local_ai_trader.hyperliquid.history import prepare_hyperliquid_history
+
+            prepare_hyperliquid_history(arguments.config, bars=arguments.bars)
+        elif arguments.command == "hyperliquid-venue-check":
+            from local_ai_trader.hyperliquid.venue import capture_venue_check
+
+            capture_venue_check(arguments.config)
+        elif arguments.command == "hyperliquid-train":
+            from local_ai_trader.hyperliquid.train import train_hyperliquid_models
+
+            train_hyperliquid_models(arguments.path, device=arguments.device)
+        elif arguments.command == "hyperliquid-decisions":
+            from local_ai_trader.hyperliquid.decisions import run_decision_scanner
+
+            run_decision_scanner(arguments.config, arguments.models, watch=arguments.watch, track_outcomes=arguments.track_outcomes, paper_monitor=arguments.paper_monitor)
+        elif arguments.command == "hyperliquid-paper":
+            from local_ai_trader.hyperliquid.guardian import run_paper_guardian
+
+            run_paper_guardian(arguments.config, watch=arguments.watch)
+        elif arguments.command == "hyperliquid-net-outcomes":
+            from local_ai_trader.hyperliquid.net_outcomes import run_net_outcomes
+
+            run_net_outcomes(arguments.config, arguments.models, arguments.book, arguments.guardian, watch=arguments.watch)
+        elif arguments.command == "hyperliquid-isolated-demo":
+            from local_ai_trader.paper.isolated_demo import isolated_demo
+
+            isolated_demo(arguments.config, arguments.venue_check)
+        elif arguments.command == "perpetual-paper-demo":
+            from local_ai_trader.paper.perpetual_demo import perpetual_demo
+
+            perpetual_demo(arguments.config)
+        elif arguments.command == "perpetual-paper-status":
+            from local_ai_trader.paper.perpetual_demo import perpetual_status
+
+            perpetual_status(arguments.path)
+        elif arguments.command == "execution-targets":
+            from local_ai_trader.forecast.targets import create_execution_target_dataset
+
+            create_execution_target_dataset(arguments.path, load_settings(arguments.config))
         elif arguments.command == "features":
             create_feature_dataset(arguments.path, load_settings(arguments.config))
+        elif arguments.command == "execution-features":
+            from local_ai_trader.forecast.features import create_execution_feature_dataset
+
+            create_execution_feature_dataset(arguments.path, load_settings(arguments.config))
         elif arguments.command == "split":
             create_split_dataset(arguments.path, load_settings(arguments.config))
+        elif arguments.command == "execution-split":
+            from local_ai_trader.forecast.split import create_execution_split_dataset
+
+            create_execution_split_dataset(arguments.path, load_settings(arguments.config))
         elif arguments.command == "baseline":
             train_baseline_experiment(arguments.path, load_settings(arguments.config))
+        elif arguments.command == "return-baseline":
+            from local_ai_trader.forecast.baseline import load_return_ridge_alpha
+            from local_ai_trader.forecast.train import train_return_baseline_experiment
+
+            train_return_baseline_experiment(arguments.path, load_settings(arguments.config), load_return_ridge_alpha(arguments.config))
         elif arguments.command == "boosting":
             from local_ai_trader.models.boosting import train_boosting_experiment
 
@@ -136,8 +319,16 @@ def main(argv: list[str] | None = None) -> int:
                     raise ValueError("PyTorch is required for mlp; use the verified CUDA environment") from error
                 raise
             train_mlp_experiment(arguments.path, load_settings(arguments.config))
+        elif arguments.command == "backtest":
+            from local_ai_trader.backtest.run import create_backtest
+
+            create_backtest(arguments.path, arguments.model, arguments.variant, load_settings(arguments.config).backtest, arguments.splits)
+        elif arguments.command == "calibrate":
+            from local_ai_trader.calibration.run import create_calibration
+
+            create_calibration(arguments.path, load_settings(arguments.config).calibration, arguments.splits)
         elif arguments.command == "evaluate":
-            evaluate_heldout(arguments.path, arguments.splits)
+            evaluate_heldout(arguments.path, arguments.splits, calibrated=arguments.calibrated)
         else:
             if not arguments.path.is_file():
                 raise ValueError(f"Parquet file not found: {arguments.path}")
@@ -151,6 +342,6 @@ def main(argv: list[str] | None = None) -> int:
                 ).fetchdf()
             print(summary.to_string(index=False))
         return 0
-    except (ValueError, OSError, RuntimeError, KeyError, duckdb.Error) as error:
+    except (ValueError, OSError, RuntimeError, KeyError, sqlite3.Error, duckdb.Error) as error:
         LOGGER.error("%s", error)
         return 1

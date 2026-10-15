@@ -1,0 +1,35 @@
+[market]
+# Public mainnet observations; all execution remains local paper simulation.
+exchange = "hyperliquid"
+instrument = "perpetual"
+coins = ["xyz:HOOD", "xyz:NVDA", "SOL", "ETH", "xyz:TSLA", "BTC", "kPEPE", "DOGE"]
+collateral_currency = "USDC"
+leverage = 1
+long_only = true
+candle_interval = "5m"
+prediction_horizon_minutes = 30
+
+[features]
+momentum_steps = 6
+rolling_window = 12
+
+[feed]
+history_bars = 24
+maximum_book_age_seconds = 30
+poll_seconds = 10
+timeout_seconds = 10
+max_attempts = 3
+
+[paper]
+# Base-tier taker assumption; fee discounts are not assumed.
+taker_fee_bps = 4.5
+minimum_forward_days = 30
+live_execution_enabled = false
+
+[gate]
+minimum_probability = 0.60
+minimum_confidence = 0.70
+maximum_positions = 5
+
+[paths]
+observations = "data/hyperliquid/live"

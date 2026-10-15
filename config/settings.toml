@@ -46,6 +46,69 @@ device = "cuda"
 mixed_precision = true
 cpu_threads = 4
 
+[calibration]
+# Earlier validation rows fit temperature; later rows assess it after purging.
+fit_fraction = 0.5
+min_temperature = 0.25
+max_temperature = 4.0
+probability_floor = 1e-12
+optimizer_tolerance = 1e-6
+max_iterations = 200
+
+[backtest]
+# Research assumptions, not optimized rules or your account's actual fee tier.
+initial_cash = 10000.0
+allocation_fraction = 0.10
+max_exposure_fraction = 0.10
+max_drawdown_fraction = 0.10
+entry_probability = 0.55
+exit_probability = 0.55
+minimum_direction_margin = 0.15
+# Basis points: 60 bps = 0.6% on each side; spread is the full bid/ask spread.
+fee_bps = 60.0
+spread_bps = 10.0
+slippage_bps = 5.0
+# Wait one complete candle after the signal, then fill at the following open.
+latency_bars = 1
+
+[walkforward]
+# Rolling calendar windows; evaluation windows never overlap.
+train_days = 60
+validation_days = 14
+evaluation_days = 14
+step_days = 14
+
+[return_forecast]
+# Separate from frozen classifier Settings; fixed starting regression baseline.
+ridge_alpha = 1.0
+
+[decision]
+# Starting rules for the future cost-aware paper policy, not optimized thresholds.
+# Existing frozen backtests continue using their recorded [backtest] rules.
+entry_probability = 0.55
+exit_probability = 0.55
+minimum_direction_margin = 0.15
+maximum_entropy = 0.90
+maximum_model_disagreement = 0.10
+require_model_comparison = true
+# Fractional net return on entry outlay: 0.002 = 0.2%, after both sides' costs.
+minimum_expected_net_return = 0.002
+
+[paper_risk]
+# Independent entry checks for the upcoming simulated paper account.
+new_entries_enabled = true
+allocation_fraction = 0.10
+max_position_exposure_fraction = 0.10
+max_total_exposure_fraction = 0.20
+max_drawdown_fraction = 0.10
+max_daily_loss_fraction = 0.02
+max_open_positions = 2
+max_signal_age_bars = 2
+max_quote_age_seconds = 30
+max_account_age_seconds = 30
+authorization_ttl_seconds = 5
+minimum_entry_cash = 10.0
+
 [download]
 lookback_days = 7
 timeout_seconds = 30

@@ -20,18 +20,8 @@ from local_ai_trader.settings import Settings, positive_integer, validate_split_
 LOGGER = logging.getLogger(__name__)
 
 
-def chronological_split(
-    features: pd.DataFrame, candle_seconds: int, horizon_steps: int,
-    train_fraction: float, validation_fraction: float,
-) -> tuple[dict[str, pd.DataFrame], dict]:
-    """Partition by time, then drop labels known at or after the next split starts.
-
-    Cut positions use floor(N * train_fraction) and
-    floor(N * (train_fraction + validation_fraction)). No shuffling occurs.
-    Validation/test may use past candle history, but their outcomes must not
-    enter earlier training or model-selection periods.
-    """
-    train_fraction, validation_fraction = validate_split_fractions(train_fraction, validation_fraction)
+def validate_feature_dataset(features: pd.DataFrame, candle_seconds: int, horizon_steps: int) -> pd.DataFrame:
+    """Check finite causal inputs and timed labels before any partitioning."""
     positive_integer(horizon_steps, "horizon_steps")
     required = set(FEATURE_COLUMNS) | set(TARGET_COLUMNS)
     if not required.issubset(features.columns):
@@ -53,6 +43,22 @@ def chronological_split(
         raise ValueError("Target availability does not match the configured horizon")
     if frame["target_available_at"].max() > pd.Timestamp.now(tz="UTC"):
         raise ValueError("Target outcomes are not yet available")
+    return frame
+
+
+def chronological_split(
+    features: pd.DataFrame, candle_seconds: int, horizon_steps: int,
+    train_fraction: float, validation_fraction: float,
+) -> tuple[dict[str, pd.DataFrame], dict]:
+    """Partition by time, then drop labels known at or after the next split starts.
+
+    Cut positions use floor(N * train_fraction) and
+    floor(N * (train_fraction + validation_fraction)). No shuffling occurs.
+    Validation/test may use past candle history, but their outcomes must not
+    enter earlier training or model-selection periods.
+    """
+    train_fraction, validation_fraction = validate_split_fractions(train_fraction, validation_fraction)
+    frame = validate_feature_dataset(features, candle_seconds, horizon_steps)
     train_end = int(len(frame) * train_fraction)
     validation_end = int(len(frame) * (train_fraction + validation_fraction))
     if not 0 < train_end < validation_end < len(frame):

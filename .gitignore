@@ -12,6 +12,8 @@ __pycache__/
 data/raw/
 data/processed/
 data/models/
+data/paper/
+data/hyperliquid/
 runs/
 logs/
 build/

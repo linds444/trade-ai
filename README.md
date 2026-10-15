@@ -1,11 +1,20 @@
 # Trade AI
 
 A local, Windows-first market research project for an NVIDIA RTX 3060 (12 GB).
-The current milestone collects and validates historical data, builds
-forward-return targets, computes causal features, and creates purged chronological
-splits, and compares naive/logistic probability baselines on validation and
-held-out test data using separate commands.
-It does not yet make trading recommendations or execute orders.
+Research includes causal features and purged splits, calibrated classifier and
+return baselines, walk-forward cost accounting, decision/risk checks and a
+persistent spot-paper execution foundation.
+
+The current deployment target is **eight Hyperliquid perpetuals, 1× leverage,
+long only**. Its public mainnet data feed validates and archives live observations
+without a wallet key. A separate restartable USDC perpetual accounting foundation
+handles margin reservation, costs and recorded funding. Venue-bound models can
+now train, calibrate and assess all eight markets in one batch. A separate quote-driven
+paper guardian coordinates recorded funding, holding exits and bounded isolated
+liquidations. Strategy entries remain paused pending separately validated
+reliability and an entry coordinator.
+Recent Hyperliquid history can now prepare all eight markets' causal features,
+execution labels and purged research partitions in one command. Live execution is disabled.
 
 ## Verified starting environment
 
@@ -94,6 +103,30 @@ Collection uses public HTTPS requests with bounded retries and page throttling.
 If Coinbase denies access, fails, or reports gaps, stop and inspect the error;
 the program does not silently substitute another exchange. Coinbase may omit
 intervals with no trades. A gap is evidence to investigate, not a candle to invent.
+
+## Reuse a complete portion of a saved raw download
+
+If repeated requests leave unresolved gaps in an earlier part of a download,
+an explicitly selected complete subrange can be processed without downloading
+everything again. For the April–September archive with gaps on May 8, select
+May 9 through September 29 (exclusive), **143 days / 41,184 candles**:
+
+```powershell
+& $projectPython -m local_ai_trader reprocess data/raw/coinbase_BTC-USD_300s_1775001600_1790640000.json --start "2026-05-09T00:00:00Z" --end "2026-09-29T00:00:00Z"
+```
+
+The command makes no API requests and applies the same OHLC, deduplication and
+strict gap checks as collection. Bounds must be aligned and contained in the
+original archive; its candle interval must match configuration. It preserves
+the original raw responses and quality report, then writes a separate Parquet
+snapshot and quality report recording the raw path, SHA-256, original bounds
+and processing time. Existing snapshots cannot be overwritten. If the selected
+range still has gaps, only a new gap report is saved. Failed writes or changes
+to the source during processing prevent candle publication.
+
+Choose the research range based on data availability before evaluating model
+results, and record the excluded period. The command does not fill missing
+candles, join disjoint periods, or change previously trained models.
 
 ## Data guarantees and limits
 
@@ -508,15 +541,1483 @@ Keep the 90-day test partitions reserved during model and calibration developmen
 The test suite includes CPU checks and a small CUDA/mixed-precision training and
 checkpoint test. The CUDA test is skipped on machines without an available GPU.
 
+## Temperature calibration
+
+Temperature scaling adjusts probability sharpness with one positive scalar per
+model: `softmax(log(max(p, probability_floor)) / temperature)`. Temperature 1 is
+the identity, temperatures above 1 soften predictions, and temperatures below
+1 sharpen them. The tiny probability floor handles zero scores. Positive
+temperature preserves each row's predicted class, so accuracy and F1 do not
+change; compare log loss, Brier score and reliability data. A fitted temperature
+does not guarantee improvement on a later period or perfect calibration.
+
+Fit a separate calibration bundle for an existing saved run:
+
+```powershell
+& $projectPython -m local_ai_trader calibrate data/models/boosting_BTC-USD_20261008T175708Z_5e9dc4f5
+```
+
+This example uses the verified 90-day BTC XGBoost checkpoint. The command
+supports naive/logistic, XGBoost and MLP runs. It restores model weights and
+preprocessing without fitting them and loads only **validation Parquet**.
+Hashes audit the original manifest/training/validation files. The test Parquet
+is never opened or hashed. Saved models are restored on CPU, so calibration
+does not need another GPU training run.
+
+With `[calibration].fit_fraction = 0.5`, the first half of validation is the
+calibration-fit period and the second half is the assessment period. Fit rows
+whose outcomes reach the first assessment prediction are purged. For each
+90-day asset this leaves **2,581 fit rows**, six labels purged, and **2,587
+assessment rows**. Fit labels are strictly known before assessment begins;
+the original validation-to-test purge is also checked.
+
+SciPy bounded scalar minimization fits temperature using only fit-period log
+loss. Fixed bounds 0.25–4 include temperature 1; identity and both endpoints
+are checked explicitly. Failed optimization stops publication. Assessment
+labels and scores cannot influence temperature fitting, and the command does
+not automatically undo calibration based on assessment results.
+
+The printed table compares raw and adjusted scores on **the same later
+validation rows**. Earlier full-validation tables used 5,174 rows and are not
+directly comparable to this smaller assessment. The later segment already
+contributed to earlier model comparisons, so it is a diagnostic calibration
+assessment, not a fresh independent test. Keep the original 90-day test
+partitions reserved while choosing models and calibration settings.
+
+An immutable `<saved-run>/calibration/` contains:
+
+- `calibration.json`: scalar temperatures, optimizer results, configuration,
+  source/model hashes, purged temporal regions and class counts.
+- `metrics.json`: separate fit-period and assessment metrics for raw and
+  temperature-adjusted predictions.
+- `assessment_<model>_<variant>.parquet`: assessment probabilities and truth.
+
+Metrics retain the existing top-label ECE convention and now also include
+`classwise_calibration_bins`, `classwise_ece` and `classwise_ece_macro`. Each
+class's bin records mean predicted probability, observed event frequency and
+count. These are reliability-curve data: for example, the `up` bins compare
+`p_up` with how often `up` actually occurred. Empty bins have null means; counts
+are not independent sample counts because adjacent horizon labels overlap.
+
+Publication is staged, failed writes leave no partial bundle, and changed
+inputs or model artifacts prevent publication. The original checkpoint,
+weights and experiment metrics are preserved. Repeated calibration or
+calibration after an existing test evaluation is refused. A `--splits` override
+supports relocated datasets only when the original hashes still match.
+
+After all choices are frozen, this optional evaluation mode reports raw and
+saved-temperature predictions together, without fitting any parameter:
+
+```powershell
+& $projectPython -m local_ai_trader evaluate <saved-run-directory> --calibrated
+```
+
+It verifies calibration/model/input hashes and purged fit-label availability,
+ignores current settings, and records the calibration checkpoint hash. Raw
+and calibrated modes share the same immutable `test_evaluation/` destination,
+preventing a second test evaluation. Missing calibration is rejected before
+test data is loaded. Do not run this on reserved test data during development.
+
+## Validation backtesting
+
+The first simulator is a **research tool on later validation assessment data**.
+It restores the saved model and temperature without fitting and identifies the
+same assessment period recorded by calibration. It loads only validation
+Parquet, audits original input/model hashes, and never opens or hashes test
+Parquet or reads classification test metrics. It can run after a classification
+test evaluation, but that test has then been consumed: policy development needs
+a fresh chronological period for independent strategy evaluation.
+
+```powershell
+& $projectPython -m local_ai_trader backtest data/models/mlp_BTC-USD_20261008T181958Z_c65a0348 --model mlp --variant temperature
+```
+
+`--model` also accepts `naive`, `logistic` and `xgboost` when present in the saved
+experiment. `--variant raw` permits a separate validation comparison. Calibration
+is required for either variant to establish the assessment period. `--config`
+selects current `[backtest]` assumptions; candle interval and horizon come from
+the saved model. `--splits` permits relocation only with matching original hashes.
+There is deliberately no test-partition option or threshold optimizer.
+
+The initial policy is single-asset, spot, long-only, with one position and one
+pending order at most. BUY requires `p_up >= entry_probability` and
+`p_up - p_down >= minimum_direction_margin`. SELL closes an existing position
+when the analogous down thresholds pass. Otherwise an open position is HOLD;
+an unmet entry threshold is AVOID. These configurable demonstration rules are
+not optimized. Class probabilities do not supply expected return, so the policy
+does not claim that a signal covers trading costs or interpret max probability
+as a separate confidence estimate.
+
+Predictions become available at candle close. With `latency_bars = 1`, the
+simulator waits one whole following candle and fills at the next open: a 00:05
+signal fills at 00:10, never at the price used to generate that signal. BUY and
+SELL signals have the same delay. Entry sizes spend `allocation_fraction` of
+cash, including fees. There is no leverage, shorting, overlapping position or
+rebalancing. A position exits after the saved horizon's number of bars **since
+execution**, or an earlier delayed SELL. This holding window starts later than
+the model's label window, which starts at prediction time. Remaining positions
+are liquidated at the last open, a boundary fixed in advance; both sides pay costs.
+The final candle's close and probabilities do not affect simulation results.
+
+Default assumptions are $10,000 cash, 10% entry allocation, a 10% maximum
+entry exposure, 10% drawdown entry limit, 0.55 directional probability and 0.15
+directional margin. The separate risk module checks available cash, exposure
+**after entry costs**, and drawdown at execution time. Exits remain permitted.
+It blocks new entries at the drawdown limit; this is not a guaranteed loss cap.
+Positions are marked at opens, so intrabar drawdown is unobserved and an existing
+position's exposure can grow after entry as prices move. Full portfolio/daily-loss
+limits and live paper-trading gates remain later work.
+
+Costs are configurable: **60 bps (0.6%) fees each side**, 10 bps total spread,
+and 5 bps adverse slippage each side. These are illustrative assumptions, not
+your actual Coinbase account fee tier. BUY price is open plus half spread and
+slippage; SELL price is open minus them. Fees apply to actual fill notional.
+High turnover can therefore overwhelm small predictive advantages. No order-book
+capacity, partial fills, minimum order sizes, taxes or cash interest are modeled.
+
+Each immutable `<saved-run>/backtests/validation_<model>_<variant>_<hash>/`
+contains `backtest.json` with assumptions, provenance and metrics, plus equity,
+fill, trade and decision Parquets for policy, cash and buy-and-hold. Changed
+settings create a different validation research bundle; an identical repeat
+cannot overwrite results. Failed writes or changed inputs leave no partial bundle.
+Buy-and-hold uses the same allocation, costs and first possible entry time,
+holds until the final open, and does not use model signals. Each asset has its
+own simulated account; these are not combined portfolio results.
+
+Metrics include net return, fees, price-impact cost, gross price PnL attribution,
+maximum drawdown, Sharpe, Sortino, win rate, profit factor, trade count, turnover,
+exposure and blocked entries. Completed-trade net PnL must reconcile with final
+cash. Turnover is both-side executed notional divided by initial capital. Annualized
+ratios use open-to-open equity returns and 365-day crypto years with zero risk-free
+return; a short validation window does not establish stable annual performance.
+Undefined ratios, no-trade win rate and profit factor with no losses are null.
+Gross PnL is cost attribution for actual quantities, not a cost-free simulation.
+
+## Walk-forward planning
+
+Freeze chronological fold datasets before fitting or reviewing fold performance:
+
+```powershell
+& $projectPython -m local_ai_trader walkforward-plan data/processed/features/coinbase_BTC-USD_300s_1778284800_1790640000_h6_features.parquet --model mlp
+& $projectPython -m local_ai_trader walkforward-plan data/processed/features/coinbase_ETH-USD_300s_1778284800_1790640000_h6_features.parquet --model xgboost
+```
+
+`[walkforward]` defaults to rolling **60-day training, 14-day validation and
+14-day evaluation** windows, advancing by 14 days. Windows use `available_at`
+prediction times and start at the first complete UTC midnight after feature
+warmup. Only full windows are included. Evaluation windows cannot overlap;
+earlier evaluation history can legitimately enter later training once its
+outcomes are known. Each fold will require fresh weights and train-only scaling.
+
+For the verified May 9–September 29 feature datasets, the anchor is May 10 UTC
+and four folds are planned:
+
+| Fold | Training start | Validation start | Evaluation start | Evaluation end (exclusive) |
+| --- | --- | --- | --- | --- |
+| 1 | May 10 | July 9 | July 23 | August 6 |
+| 2 | May 24 | July 23 | August 6 | August 20 |
+| 3 | June 7 | August 6 | August 20 | September 3 |
+| 4 | June 21 | August 20 | September 3 | September 17 |
+
+Labels whose outcomes become known at or after a partition's end are excluded
+in **all three partitions**, including equality. This removes six rows from
+each boundary and prevents the last fold's labels crossing its evaluation end.
+Each fold therefore contains **17,274 training, 4,026 validation and 4,026
+evaluation rows**. Earlier validation will fit temperature; later validation
+will assess it using the existing additional purge. Adjacent 30-minute targets
+inside each partition still overlap and are not independent observations.
+
+An immutable `data/processed/walkforward/<feature-stem>/` contains `plan.json`
+and `fold_01` through `fold_04`, each with training/validation/test Parquets and
+a compatible `split.json`. The plan records source hashes, hashes of every fold
+file, unused leading/tail rows and fixed model/calibration/backtest settings.
+The selected family is recorded along with naive/logistic controls and a raw
+probability comparator. Source changes or failed writes prevent publication.
+
+Calendar fractions are 60/88 and 14/88; the execution runner restores
+these and the other frozen settings from the protocol. This command only
+prepares folds: it does not fit models or report fold performance. Do not change
+model or policy settings in response to individual evaluation-fold results.
+These dates overlap previously examined research periods, so walk-forward
+results are historical stability evidence. A fresh later period remains
+necessary for an independent final strategy evaluation.
+
+## Walk-forward execution
+
+Run a saved plan with its frozen settings:
+
+```powershell
+& $projectPython -m local_ai_trader walkforward-run data/processed/walkforward/coinbase_BTC-USD_300s_1778284800_1790640000_h6_features
+& $projectPython -m local_ai_trader walkforward-run data/processed/walkforward/coinbase_ETH-USD_300s_1778284800_1790640000_h6_features
+```
+
+There is no current-config or parameter override. Each fold fits fresh selected
+MLP/XGBoost weights and fresh naive/logistic controls using training data only.
+It then fits scalar temperatures on earlier validation, purges overlapping
+outcomes, and assesses later validation. **Every fold's models and temperatures
+are saved before any evaluation Parquet is read or hashed.** Evaluation outcomes
+can enter later folds' training history, but never tune the frozen research
+recipe. Raw and temperature-scaled probabilities are always retained together;
+assessment results do not change the chosen variant or thresholds.
+
+The plan's `execution/` directory contains each fold's model checkpoints,
+calibration, paired evaluation predictions and eight cost-aware simulations:
+raw/scaled naive, logistic and the selected family, plus cash and buy-and-hold.
+Simulations use the frozen delayed fills, fees, spread, slippage and risk gates.
+Policies receive candle prices and saved probabilities without future labels.
+Positions liquidate at the predefined last selected open; the final purged
+label rows are excluded from the simulated price timeline too.
+
+Each fold starts with the same cash and resets positions and risk history.
+`execution/summary/summary.json` reports pooled prediction scores, per-fold
+performance, mean/best/worst fold returns, worst fold drawdown and totals for
+trades and costs. This is a summary of separate reset accounts, not a continuous
+portfolio or a compounded return. Evaluation windows do not overlap, but
+30-minute labels within them do; confidence intervals are not computed.
+
+If interrupted, rerun the same command with `--resume`. Saved checkpoints,
+calibration and evaluation bundles are verified and reused, including bundles
+whose atomic publication completed just before a journal-write failure.
+Completed evaluations are not recomputed. Changed input or artifact hashes
+stop execution. A `running.lock` prevents concurrent runs; after a hard process
+crash, verify that the recorded process has stopped before removing a stale
+lock and resuming. Failed writes retain previously completed research results.
+
+The runner supports nested Windows paths longer than 260 characters using
+extended absolute paths. Atomic Parquet writes reuse an open temporary file.
+No registry edits, administrator access or folder relocation are required.
+Automated tests run on Windows and Linux, including a long-path file round trip.
+
+## Uncertainty diagnostics
+
+After a walk-forward run is complete, describe its saved probability distributions:
+
+```powershell
+& $projectPython -m local_ai_trader uncertainty data/processed/walkforward/coinbase_BTC-USD_300s_1778284800_1790640000_h6_features
+& $projectPython -m local_ai_trader uncertainty data/processed/walkforward/coinbase_ETH-USD_300s_1778284800_1790640000_h6_features
+```
+
+This first uncertainty milestone computes normalized Shannon entropy, top-class
+probability and the margin between the largest two probabilities. Entropy is
+zero for a deterministic distribution and one for a uniform three-class
+distribution. It describes ambiguity within the prediction. Low entropy can
+occur in an incorrect prediction; its complement is not calibrated confidence.
+Top-class probability is retained under its explicit name.
+
+The selected MLP/XGBoost distribution is also compared with logistic regression
+at identical prediction times using equal-weight Jensen-Shannon divergence,
+normalized by `log(2)`. Zero means identical distributions; one means disjoint
+supports. Disagreement exposes different model views, but correlated models can
+agree and be wrong. Raw and temperature-scaled variants are compared separately
+against the same variant of logistic; those two variants of one model are not
+treated as independent ensemble members. Naive controls retain entropy scores.
+
+Reports require a complete, plan-bound execution and verify all recorded model,
+calibration, evaluation, backtest and summary hashes. They reuse saved predictions
+without fitting or running model inference. `execution/uncertainty/` contains an
+immutable JSON report and six enriched prediction Parquets. Original results,
+decisions and accounting remain unchanged. Five predefined entropy bands show
+descriptive accuracy on already consumed outcomes; they do not select trading
+thresholds or establish a new unseen evaluation.
+
+Entropy is inexpensive and uses one forward prediction. Model disagreement
+requires comparable model outputs. Monte Carlo dropout requires repeated model
+passes, and independently trained ensembles require additional checkpoints;
+these are later options when evaluation justifies their cost. None of these
+scores estimates expected return after fees. A future cost-aware entry policy
+needs return-size forecasts aligned with its execution and holding horizon.
+
+## Cost-aware decision candidates
+
+The separate `[decision]` table configures the future paper policy's probability,
+entropy and model-disagreement limits and its required net-return margin. These
+are engineering starting points, not thresholds optimized on historical test
+results. `DecisionSettings` remains separate from frozen research `Settings`,
+so adding this table does not invalidate previously saved walk-forward plans.
+
+The policy requires a structured `ReturnForecast` before proposing a BUY. Its
+symbol, prediction time, candle interval, entry latency and holding duration
+must match the prediction and execution assumptions. Its target is fractional
+reference-price return from **delayed entry open to horizon exit open**. Existing
+close-to-close classification targets have different timing and cannot supply
+this forecast. Current classifiers supply no expected-return estimate, so new
+entries produce `AVOID / expected_return_unavailable`.
+
+With per-side fee fraction `f` and adverse price impact
+`i = (full_spread_bps / 2 + slippage_bps) / 10000`, entry outlay includes the
+buy fee and exit proceeds deduct the sell fee:
+
+```
+factor = (1 - i) * (1 - f) / ((1 + i) * (1 + f))
+expected_net_return = (1 + expected_gross_return) * factor - 1
+required_gross_return = (1 + minimum_expected_net_return) / factor - 1
+```
+
+This return is per unit of entry cash outlay, not the whole account. The frozen
+60-bps-per-side fee, 10-bps full spread and 5-bps slippage imply approximately
+**1.4099% gross break-even**. The initial 0.2% net margin requires gross return
+**strictly above 1.6127%**. This is a model-based mean threshold under fixed
+costs, not a guaranteed realized profit. Earlier policy/risk exits can have a
+different return than the fixed-horizon forecast.
+
+Valid entries also require the configured up-probability and direction margin,
+entropy limit and an aligned reference-model comparison by default. A BUY is
+only a candidate: the independent risk gate must still authorize execution and
+position size. SELL/HOLD logic for open positions does not depend on entry
+return estimates, entropy limits or reference availability. Freshness and account
+state checks belong to the future paper coordinator and risk gate.
+
+Inspect an already completed run's last saved prediction with:
+
+```powershell
+& $projectPython -m local_ai_trader decision-preview data/processed/walkforward/coinbase_BTC-USD_300s_1778284800_1790640000_h6_features
+```
+
+The command writes one immutable `execution/decision_preview/preview.json` with
+probabilities, uncertainty, cost hurdles, current decision settings and source
+hashes. It assumes a flat position and uses the plan's original costs. It is a
+historical diagnostic, not a current market signal or new strategy evaluation.
+It creates no orders, fits no models, and does not alter recorded backtests.
+The next forecasting milestone must train and validate an execution-aligned
+return model before a real BUY candidate can reach the paper risk gate.
+
+## Execution-aligned return targets
+
+Prepare the return forecaster's supervised targets from the original complete
+candles, using the current timeframe, holding horizon and latency assumptions:
+
+```powershell
+& $projectPython -m local_ai_trader execution-targets data/processed/coinbase_BTC-USD_300s_1778284800_1790640000.parquet
+& $projectPython -m local_ai_trader execution-targets data/processed/coinbase_ETH-USD_300s_1778284800_1790640000.parquet
+```
+
+For a prediction at `available_at[t]`, entry occurs at
+`timestamp[t + 1 + latency_bars]` and horizon exit occurs at
+`timestamp[t + 1 + latency_bars + holding_bars]`. The regression target is the
+fractional change between those **reference open prices**. A separate diagnostic
+net label applies the same multiplicative fees/spread/slippage conversion as the
+cost-aware policy. Its unit is entry cash outlay, independent of position size.
+It represents a fixed-horizon outcome, not a replay of earlier SELL/risk exits.
+
+With five-minute candles, one latency bar and six holding bars, a signal at
+00:05 enters at 00:10 and exits at 00:40. This pipeline uses completed OHLCV
+candles, so it conservatively marks the target as known at the exit candle's
+completion, **00:45**. The label is available eight bars (40 minutes) after
+prediction. Future splits must purge against `execution_target_available_at`;
+the classifier's six-bar purge is insufficient for these targets.
+
+Eight trailing source rows lack an exit candle and are removed. Each verified
+143-day, 41,184-row source therefore yields **41,176 execution labels** before
+feature warmup or split purging. Original causal candle columns are preserved.
+Future entry/exit times, reference prices and both return labels are explicitly
+marked as future-only metadata/targets, never model inputs. OHLCV, market,
+availability and contiguous-timeline checks reject incomplete or malformed data.
+
+An immutable `data/processed/execution_targets/<source-stem>_h6_l1/` contains
+`labels.parquet` and `targets.json`. Metadata records source and label hashes,
+timing offsets, formulas, conservative availability, costs and future-only
+columns. Atomic publication prevents partial bundles and rejects source changes.
+This command does not fit a model or evaluate a new strategy.
+
+## Causal features for execution-aligned returns
+
+Build the same eight trailing OHLCV features for the new return targets:
+
+```powershell
+& $projectPython -m local_ai_trader execution-features data/processed/execution_targets/coinbase_BTC-USD_300s_1778284800_1790640000_h6_l1
+& $projectPython -m local_ai_trader execution-features data/processed/execution_targets/coinbase_ETH-USD_300s_1778284800_1790640000_h6_l1
+```
+
+The command takes a target **bundle directory**, not the classifier's target
+Parquet. It verifies the original candle, label and metadata hashes, reconstructs
+the execution targets from their original candles, and checks the complete
+stored schema and timing contract before building features. Keep the original
+candle Parquet at the path recorded in `targets.json`.
+
+Only the nine completed causal candle columns reach feature calculation.
+All future entry/exit prices, times, returns and availability are attached
+afterward as labels. Changing future labels or future market data cannot change
+earlier model inputs. Models must select the ordered eight `feature_names`,
+never every numeric column. No normalization or global statistics are fitted;
+eventual scaling must use the training partition alone.
+
+With default settings, **41,176 execution labels become 41,164 feature rows**
+after removing 12 leading warmup rows. The eight-bar label availability remains
+unchanged and must drive future split purging. Existing classifier splits and
+their six-bar purge cannot be reused for these targets.
+
+An immutable `data/processed/execution_features/<target-bundle-name>/` contains
+`features.parquet` and `features.json`. Publication is atomic, including long
+Windows paths without a registry change. Metadata records the feature allowlist,
+all future-only columns, upstream hashes, output hash, frozen target costs and
+timing, and feature parameters. Current fee changes do not rewrite old diagnostic
+net labels. No source artifact is modified, and reruns cannot overwrite output.
+This stage does not train a return model or measure strategy performance.
+
+## Chronological execution-return splits
+
+Create separate regression partitions from an audited execution feature bundle:
+
+```powershell
+& $projectPython -m local_ai_trader execution-split data/processed/execution_features/coinbase_BTC-USD_300s_1778284800_1790640000_h6_l1
+& $projectPython -m local_ai_trader execution-split data/processed/execution_features/coinbase_ETH-USD_300s_1778284800_1790640000_h6_l1
+```
+
+The command verifies all upstream hashes and reconstructs features and labels
+before partitioning. It preserves the chronological order and feature values,
+using the configured 60%/20%/20% cut positions. No scaling or model fitting occurs.
+Retain a training or validation row only if `execution_target_available_at` is
+**strictly before** the next partition's first prediction time. The default
+execution labels require **eight purged rows at each boundary**, including the
+row whose label becomes known exactly at the boundary. A six-bar classifier
+purge would leak two extra rows of outcomes into each earlier partition.
+
+For each verified **41,164-row** source, the default partitions contain:
+
+| Partition | Raw rows | Purged rows | Retained rows |
+| --- | ---: | ---: | ---: |
+| Train | 24,698 | 8 | 24,690 |
+| Validation | 8,233 | 8 | 8,225 |
+| Test | 8,233 | 0 | 8,233 |
+
+Unknown trailing labels were already removed by the target command. Test needs
+no additional end purge, and validation/test features can use older candle
+history. Eventual scaler fitting must use training rows only. The reserved test
+partition has not been scored by a return model or new strategy; these dates
+overlap previous classifier research and are not a fresh final strategy period.
+
+An immutable `data/processed/execution_splits/<feature-bundle-name>/` contains
+`train.parquet`, `validation.parquet`, `test.parquet` and `split.json`. Its manifest
+records all input hashes, each partition's output hash, cut positions, purged
+prediction times, label availability, the feature allowlist and source lineage.
+Publication is atomic, supports long Windows paths and cannot overwrite an
+existing bundle. Existing classifier datasets and experiment protocols are
+unchanged. Return forecasting and train-only preprocessing are the next step.
+
+## Execution-aligned return baselines
+
+Fit two point-forecast baselines from the new regression splits:
+
+```powershell
+& $projectPython -m local_ai_trader return-baseline data/processed/execution_splits/coinbase_BTC-USD_300s_1778284800_1790640000_h6_l1
+& $projectPython -m local_ai_trader return-baseline data/processed/execution_splits/coinbase_ETH-USD_300s_1778284800_1790640000_h6_l1
+```
+
+- **Mean:** the arithmetic mean of training `execution_target_return`, repeated
+  for every prediction. It is a control for changing market drift.
+- **Ridge:** `StandardScaler` fitted on training rows alone, followed by a
+  regularized linear return regressor with intercept and deterministic SVD.
+  The separate `[return_forecast]` table sets `ridge_alpha = 1.0`. It does not
+  change the frozen classifier Settings or old walk-forward protocols.
+
+Both use only the eight feature names. The supervised target is the fractional
+gross reference-price return from delayed entry open to fixed-horizon exit open;
+fees, spread and slippage remain the decision layer's cost conversion. The
+regressor runs on CPU, needs no new dependencies, and is a starting comparison
+before more complex return models.
+
+For each prepared 143-day dataset, **24,690 training rows** fit the model and
+scaler; **8,225 validation rows** assess them. The trainer verifies manifest
+semantics, per-partition hashes, strict eight-bar purges, timed labels and
+reference-price returns. It opens/hashes only `split.json`, `train.parquet` and
+`validation.parquet`. The reserved `test.parquet` and full upstream candle,
+target and feature datasets remain unopened. Do not invoke the dataset-preparation
+loaders from a fitting phase: those loaders reconstruct entire historical sources.
+
+The console reports validation MAE, RMSE, R-squared, mean error, mean forecast and
+mean observed return. These are **fractions**: `0.001` is `0.1%`. Lower MAE/RMSE is
+better; negative R-squared means the validation outcomes' own mean would have
+lower squared error. That validation mean is only an explanatory metric baseline,
+not a forecast available in advance. R-squared is `null` for constant outcomes.
+Overlapping labels are not independent observations, and these error metrics
+do not establish profitability, trade confidence or strategy performance.
+
+An atomic immutable `data/models/return_baseline_<symbol>_<UTC>_<id>/` contains:
+
+- `checkpoint.json`: training mean, exact scaler statistics, Ridge weights,
+  market/timing basis, training label availability and input provenance;
+- `metrics.json`: training diagnostics and validation errors; test unevaluated;
+- `validation_mean.parquet` and `validation_ridge.parquet`: aligned point
+  forecasts and historical outcomes, with fixed-cost net diagnostics;
+- `experiment.json`: settings, model parameters, package versions, input hashes
+  and a hash for every model/metric/prediction artifact.
+
+JSON checkpoint inference uses saved weights and scaling, with no refitting or
+pickle loading. Structured `ReturnForecast` packets carry the symbol, signal
+time, interval, latency, holding horizon and `execution_open_to_open` basis
+required by the cost-aware policy. Packets cannot precede or equal the last known
+training label. Unconstrained Ridge outputs below `-1` are counted as invalid in
+diagnostics and refused as forecast packets; predictions are never clipped.
+These point forecasts supply no uncertainty interval or correctness probability.
+
+This command does not change the existing historical decision previews, select a
+trading threshold, backtest a new policy, or submit orders. A saved return model
+still needs assessment and an explicit integration into inference and the
+separate paper risk coordinator. No fresh independent strategy period is claimed.
+
+## Historical decision preview with a saved return forecaster
+
+Supply a trained return run to the existing preview command:
+
+```powershell
+& $projectPython -m local_ai_trader decision-preview data/processed/walkforward/coinbase_BTC-USD_300s_1778284800_1790640000_h6_features --return-run "data/models/return_baseline_BTC-USD_<UTC>_<id>"
+```
+
+Replace the placeholder with the actual saved run directory. `--return-model`
+defaults to `ridge`; `mean` selects the same run's training-mean control. Without
+`--return-run`, the original preview behavior is preserved. There is no option
+to type in an invented expected return.
+
+The command audits the saved classifier execution and return experiment,
+including model/metric/prediction hashes and recorded training provenance.
+Market, candle interval, holding period, execution latency, feature schema,
+momentum and rolling windows must match. It locates the final classifier signal
+in its frozen fold's feature table and projects only causal candle metadata and
+the eight feature columns into **one** return inference. Future labels are never
+inputs. The signal must occur after all return-model training labels were known.
+Classifier inference is reused; no classifier or return model is fitted again.
+Reserved return test and full return source datasets remain unopened.
+
+The preview prints expected gross return, expected net return under the frozen
+walk-forward costs, break-even gross return, required margin and the decision
+reason. Source-run diagnostic fees do not replace the classifier plan's cost
+assumptions. A forecast that fails cost coverage yields `AVOID`; a `BUY` candidate
+still requires independent risk authorization and creates no orders.
+
+An immutable report is saved under
+`execution/forecast_decision_previews/<return-manifest-hash>_<model>_<policy-hash>/`.
+It records the signal, point forecast, model and feature-source hashes, timing
+basis, policy/costs and separate risk status. The original `decision_preview`
+and all model/backtest/uncertainty bundles remain unchanged. Atomic publication
+is refused if a model, classifier source or policy config changes during preview.
+
+This is a historical flat-position explanation, not a current market instruction
+or a new strategy evaluation. The classifiers' recorded outcomes were already
+consumed by research, point forecasts supply no uncertainty interval, and a
+fresh later period plus freshness/account/risk checks remain necessary for the
+eventual paper coordinator.
+
+## Independent paper entry risk checks
+
+The pure `risk.paper.authorize_paper_entry` function accepts a BUY candidate,
+timestamped quote and paper account snapshot. It sizes a simulated spot-long
+entry and returns an approval or a specific refusal. It creates no orders,
+changes no account state and never opens the saved historical datasets.
+Historical AVOID previews do not request entry authorization.
+
+The separate `[paper_risk]` table configures these starting limits:
+
+| Check | Default |
+| --- | --- |
+| Entry cash budget | 10% of current total equity |
+| Per-market / total marked exposure | 10% / 20% of projected equity |
+| Maximum drawdown / UTC daily loss | 10% / 2% |
+| Positions including pending entries | 2 |
+| Signal age | Strictly less than 2 candles |
+| Quote / account and portfolio mark age | Strictly less than 30 seconds |
+| Approval lifetime | At most 5 seconds |
+| Minimum entry cash outlay | $10 |
+
+Markets, candle duration and holding horizon come from the primary configuration;
+execution latency and modeled fee/spread/slippage come from its cost settings.
+The signal must be interval-aligned, its execution delay must have elapsed, and
+the quote must be from that eligible execution time or later. Future timestamps,
+stale historical signals, invalid prices, missing current-day equity baselines,
+duplicate holdings and inconsistent reservations are refused. The account must
+explicitly be a paper account denominated in USD.
+
+Current equity includes cash and every marked holding. Pending entries reserve
+cash, count toward position and exposure caps, and conservatively reduce projected
+equity by their possible entry costs; prospective gains do not increase it.
+New quantity includes adverse fill impact and entry fees within the cash budget.
+Projected equity, after those costs, must pass both loss limits and all exposure
+limits. Loss-limit equality blocks an entry. Setting `new_entries_enabled = false`
+pauses entries. **This entry gate must never veto a reducing exit**; SELL/HOLD
+actions are not entry requests.
+
+Approvals carry exact simulated sizing, fees, input fingerprint and account
+version. They expire at the earliest of their lifetime, any input freshness
+deadline or UTC midnight. `paper_authorization_is_current` reruns all checks and
+refuses changed inputs, sizing or account versions. The paper coordinator
+must recheck fresh inputs and commit against the same version atomically. These
+functions alone provide no persistent ledger, transaction lock or order execution.
+The existing immutable research protocols and historical simulator remain unchanged.
+
+Exercise the gate without models or an account ledger:
+
+```powershell
+& $projectPython -m local_ai_trader paper-risk-demo --config config/settings.toml
+```
+
+This diagnostic uses **invented probabilities, a positive test return and synthetic
+accounts**. Under the default config, one fresh candidate is approved; stale data,
+paused entries, loss boundaries, pending reservations and position limits are
+blocked. Nothing is saved or traded. The synthetic positive forecast is not a
+forecast for either market and does not change historical AVOID decisions.
+
+## Persistent paper account and execution coordinator
+
+`paper.ledger.PaperLedger` stores a USD spot-long simulated account in SQLite.
+It uses Python's standard library and makes no broker requests. Each operation
+locks the account with `BEGIN IMMEDIATE`, refreshes observed marks, checks risk
+against the locked version and saves cash, holdings, fills, closed trades and its
+journal in one transaction. Full synchronous commits preserve SQLite recovery.
+A failure before commit rolls back every change. Competing processes reread the
+committed account rather than spending against an old snapshot.
+
+Creation freezes the market/timing, cost and risk contract, hashes it and refuses
+an existing file. Accounts start with the configured simulated cash, not a deposit.
+An entry accepts a structured candidate and quote plus timestamped marks for
+existing holdings. It obtains its own approval inside the transaction and checks
+expiry again before commit; outside approvals cannot execute an order. Real-time
+callers leave `now` unset so freshness uses the clock after the lock is acquired.
+The explicit clock parameter is for deterministic tests/replay.
+
+Every mutation requires a stable operation ID. Retrying identical inputs returns
+the original result, including after restart, and adds no fill or account version.
+Using the same ID with changed inputs is refused. Refusals are journaled too; a
+new attempt needs a new ID. An optional expected account version refuses a stale
+worker. There are no outstanding broker orders or persistent entry queues in this
+coordinator: an approved fill commits immediately. Earlier signal scheduling
+belongs to the upcoming current-data loop, and execution still checks latency.
+
+Entries use the existing modeled adverse buy impact and entry fees within their
+cash budget. Positions record actual fill time, original quote time and a holding
+deadline starting at the fill. Full exits use fresh sell quotes with adverse
+impact and exit fees. Policy, risk and manual exits bypass entry pauses and loss
+filters. Holding-deadline exits require a quote from the deadline or later, use
+stable position-specific IDs, and cannot accidentally close a replacement
+position. Missed deadlines after downtime wait for a fresh quote; no past fill
+price is invented. A late or early exit differs from the forecaster's fixed
+open-to-open target window.
+
+Daily limits keep the recorded UTC opening equity. When the account was flat at
+midnight, the coordinator reconstructs that value from initial cash and prior
+fills. An overnight holding requires explicitly supplied observed midnight marks.
+If they are unavailable, new entries remain blocked and exits remain available.
+Selling an overnight position cannot erase that day's missing baseline or losses.
+
+Restart and `audit()` reconstruct cash and inventory from all fills, verify
+modeled costs, closed trade PnL, operation hashes, version sequence and the last
+journaled account/marks. Marked equity minus starting cash equals realized plus
+unrealized net PnL. Status is read-only and reports the last marked values; it
+does not fetch current prices. Runtime entry pause/resume is persisted separately
+and cannot override a disabled frozen risk setting. Extended native Windows paths
+support deeply nested account files without changing the user's registry.
+
+Run a controlled persistence demonstration:
+
+```powershell
+& $projectPython -m local_ai_trader paper-demo --config config/settings.toml
+```
+
+This creates a new **synthetic** account under
+`data/paper/synthetic_<UTC>_<id>/account.sqlite`, records an invented $100 reference
+entry, retries it, reopens the database and fast-forwards the test clock to a $102
+holding-deadline exit. It audits exactly two fills, one closed trade and no open
+holdings. Its hand-picked prices and positive test forecast are not model outputs
+or strategy performance. The console prints the saved account path. Paper
+databases are ignored by Git; historical data, models and AVOID previews remain
+unchanged.
+
+Inspect a saved account without changing it:
+
+```powershell
+& $projectPython -m local_ai_trader paper-status "data/paper/<account-directory>/account.sqlite"
+```
+
+## Hyperliquid perpetual market-data integration
+
+The current deployment target is **eight Hyperliquid perpetuals, 1× leverage,
+long only, with USDC collateral**. Its separate `config/hyperliquid.toml` records
+that contract, a provisional base-tier taker fee of **4.5 bps (0.045%) per side**,
+and a minimum 30-day forward paper period. No referral, volume or staking discount
+is assumed. This configuration has no wallet, private key or signing settings;
+`live_execution_enabled` must remain false.
+
+| Scanner symbol | Hyperliquid contract | Contract unit |
+| --- | --- | --- |
+| HOOD | `xyz:HOOD` | 1 underlying unit |
+| NVDA | `xyz:NVDA` | 1 underlying unit |
+| SOL/USD | `SOL` | 1 SOL |
+| ETH/USD | `ETH` | 1 ETH |
+| TSLA | `xyz:TSLA` | 1 underlying unit |
+| BTC/USD | `BTC` | 1 BTC |
+| PEPE/USD | `kPEPE` | **1,000 PEPE** |
+| DOGE/USD | `DOGE` | 1 DOGE |
+
+HOOD/NVDA/TSLA are HIP-3 equity perpetuals, not ownership of shares. Their `xyz`
+metadata is fetched separately from validator-operated crypto perpetuals. Both
+venues must report USDC collateral (token index zero); a change refuses the
+observation. Display symbols retain the requested `/USD` labels, while settlement
+is explicitly USDC. PEPE display prices divide contract prices by 1,000; candles,
+model features, execution quantities and funding remain in **contract units**.
+Daily quote notional is never multiplied by that conversion. HIP-3 deployer fee
+scale and growth mode adjust the base fee assumption separately per contract;
+currently the three configured equity perpetuals imply 0.9 bps per side before
+account discounts. Fee settings are read again each observation.
+
+The intended flow is **Source → Decision → Gate → Paper**. `MarketState` supplies
+the same fields for live observations and a seeded, explicitly synthetic offline
+universe: price, fractional 24h change, quote notional volume, causal momentum,
+news and regime. Live news/regime are unavailable until their sources/models are
+connected; generated data is never a fallback for a failed live feed.
+
+The separate signal policy defaults to **60% calibrated probability, 70% validated
+confidence and five occupied positions**, counting pending entry reservations.
+`evaluate_entry_signal` names every rule, returning BLOCK or REVIEW when evidence
+is missing/low. Confidence needs a separate validated reliability measure; model
+probability and entropy are not relabeled as confidence. Passing this gate only
+makes a candidate eligible for independent account risk authorization. HOLD,
+AVOID and SELL do not create new entries; reducing exits use their own path.
+These policy targets are saved in observations, but the source collector has no
+connected decision model, review queue or execution coordinator yet. It does not
+report an active signal gate or claim calibrated offline decisions/performance.
+
+Read actual public **mainnet** market data without an API key:
+
+```powershell
+& $projectPython -m local_ai_trader hyperliquid-feed --config config/hyperliquid.toml
+```
+
+The command reads only the public `https://api.hyperliquid.xyz/info` endpoint:
+perpetual metadata/asset contexts, eight order books and recent five-minute
+candles. It does not use testnet prices. It has no exchange-order, withdrawal,
+wallet or signing client. Its request allowlist also refuses unrequested action
+types and extra signature/wallet fields. Transient HTTP/rate-limit errors receive
+bounded retries; permanent failures surface without switching data sources.
+
+The console prints display prices, contract best bid/ask, current hourly funding,
+completed candle counts and causal feature counts. Book age uses the exchange's
+millisecond timestamp and must be strictly under 30 seconds at validation and
+again before publication. Reception does not freshen a stale book. Asset contexts
+do not include an exchange timestamp; their reception time is recorded separately
+and is not represented as an exchange event time.
+
+Candle history and features are processed before books are requested, so a slow
+history response cannot age an already received quote. A stale capture retries
+the observation once using new exchange responses; persistently stale quotes
+still refuse publication. A future-dated quote refuses immediately. Timestamp
+errors identify the contract, signed age, exchange UTC, local UTC and required
+age range. A negative age can indicate a PC clock behind exchange time; check
+Windows **Settings → Time & language → Date & time → Sync now**. The collector
+never changes the PC clock, permits future quotes or increases the age limit.
+
+The default window contains 24 completed candles and 12 feature rows after the
+original warmup. Hyperliquid's inclusive candle-close millisecond becomes
+`available_at = open + 300 seconds`. The current unfinished candle is excluded
+even if the endpoint returns it. Missing intervals, conflicting duplicates,
+wrong coins/intervals, invalid OHLCV, crossed/empty books and invalid contract
+metadata are refused. An interval boundary crossed during fetching is retried
+with a new completed window. The existing eight trailing features are computed
+without labels, fitted scaling or model inference.
+
+A new immutable `data/hyperliquid/live/snapshot_<UTC>_<id>/` contains raw public
+responses, eight completed candle and feature Parquets, and `snapshot.json` with
+configuration/artifact hashes, quality, source times and contract context. Frames
+use `exchange = hyperliquid` and symbols `BTC-USDC` / `ETH-USDC`; the manifest
+explicitly identifies perpetuals. Publication is atomic and supports long native
+Windows paths. Filenames replace the `xyz:` colon with an underscore, preserving
+the original exchange identifiers inside reports and frames. A stale book,
+advanced candle boundary or changed config before
+publication leaves no published bundle. Runtime observations are ignored by Git.
+
+Optionally collect each new completed five-minute window until Ctrl+C:
+
+```powershell
+& $projectPython -m local_ai_trader hyperliquid-feed --config config/hyperliquid.toml --watch
+```
+
+Watch mode checks for the next boundary every ten seconds and archives once per
+completed window, avoiding repeated full-window files within the same candle.
+Data errors are logged and retried; stopping is clean. This is a data collector,
+not a continuous trading or liquidation service.
+
+Hyperliquid pays funding hourly. A positive rate charges longs; a negative rate
+credits them. The documented payment is **position size × oracle price × actual
+hourly funding rate**, using the oracle rather than mark price. The context's
+current rate is not guaranteed future funding. These observations do not charge
+funding to an account or fabricate paper fills/performance.
+
+The earlier Coinbase datasets/models are historical spot research, and the
+existing persistent ledger settles simulated spot buys in USD. They are not
+silently relabeled or connected as a Hyperliquid perpetual strategy. Next work
+must connect the separate USDC accounting foundation to observed funding, venue
+liquidation rules and venue-bound model training/inference before starting the
+actual forward paper trial. Merely running
+the data collector does **not** start its performance clock. A profitable month
+must include modeled fees, slippage and funding; it is a review milestone and
+does not enable live execution automatically. Live execution requires a separate
+implementation and explicit approval at that time.
+
+An execution adapter boundary makes a future broker implementation replaceable;
+going live also needs signed order handling, exchange/account reconciliation and
+venue-specific risk checks. It is not enabled by changing one paper-fill file.
+
+Primary references: [public API](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint),
+[funding](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/funding),
+[fees](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/fees), and the
+[official Python information client](https://github.com/hyperliquid-dex/hyperliquid-python-sdk/blob/master/hyperliquid/info.py).
+
 ## Next milestones
 
-1. Compare naive, logistic, XGBoost and MLP validation results on the predefined
-   90-day research partitions while reserving test data.
-2. Measure and implement calibration with separate calibration/evaluation periods.
-3. Add cost-aware backtesting, walk-forward evaluation and local experiment logs.
-4. Add a Transformer only when evidence warrants it, then uncertainty, configurable
-   policy, a separate risk gate, paper trading, API and dashboard.
+1. Connect recorded funding, venue liquidation rules and Hyperliquid-trained models.
+2. Connect the saved models and public feed to a scheduled forward paper loop.
+3. Add a local API and dashboard showing forecasts, uncertainty, decisions,
+   risk refusals and paper-account results.
 
-Every change must demonstrate improvement against the previous model on suitable
-unseen data. Training, validation, test, backtest and paper-trading performance
-will be reported separately. A profitable backtest does not establish live profitability.
+More complex models remain conditional on evidence. Training, validation, test,
+backtest and paper results will be reported separately. The current models and
+historical policies have not demonstrated a profitable edge after costs.
+
+## USDC perpetual paper accounting foundation
+
+`PerpetualPaperAccount` is separate from the historical USD spot ledger. Its
+virtual USDC wallet retains collateral principal; a 1× position reserves initial
+margin equal to quantity × entry fill price. Wallet cash moves only for fees,
+realized fill-price PnL and recorded funding. Equity adds unrealized mark-to-market
+PnL. Available collateral uses the lower of wallet and equity minus reserved
+margin, preventing unrealized gains from being spent. Quantities and oracle
+prices remain in exchange contract units, including `kPEPE`.
+
+The account freezes its source mode, policy, risk profile and slippage assumption
+at creation. Defaults preserve 10% per-position exposure, 20% total exposure,
+10% drawdown and 2% UTC daily loss. Five positions is a ceiling; total exposure
+still applies. Independent signal checks require calibrated probability and a
+separately validated reliability measure. The trusted model adapter must verify
+their artifact references; nonempty IDs are audit references, not a calibration
+procedure performed by the account. Missing reliability routes to REVIEW.
+Entries also require fresh portfolio marks, delayed causal signal timing and
+forecast coverage of spread, slippage, both fees, a nonnegative funding cost
+budget and a 0.2% net margin. Missing funding-cost estimates route to REVIEW.
+
+Funding requires a settled UTC-hour rate with provenance and an oracle recorded
+within 30 seconds of that settlement. Positive rates debit longs, negative rates
+credit them, using **quantity × oracle price × settled hourly rate**. Current
+context funding is not used as a guaranteed settled rate. Oracle observations
+near an exchange settlement are explicitly modeled estimates in observed-mode
+accounts, not reconstructed exact historical exchange oracles. Synthetic funding
+cannot be inserted into observed-mode accounts.
+
+New accounts preserve the actual published funding event milliseconds, not just
+the UTC-hour label. A position opened or closed between the nominal hour and
+actual settlement is charged only if held at the real event. Until its event is
+known, entries in the first 30 seconds of an hour have conservative unresolved
+funding coverage. Older hour-based accounts retain their original semantics;
+they are not silently converted into observed accounts with actual event timing.
+
+Every potentially held settlement must have a recorded event. Missing hours make
+performance provisional and block new entries. They do not block reducing exits.
+Later funding can settle a closed position's outstanding liability, updating its
+net PnL and wallet without inventing another fill. The same coin/hour cannot be
+charged twice or silently changed. Holding deadlines start at actual fill time;
+missed deadlines use current fresh quotes. Overnight holdings without a known
+UTC opening-equity baseline block entries for that day; closing them does not
+erase the missing baseline. Pauses and loss limits never veto a fresh exit.
+
+SQLite `BEGIN IMMEDIATE` and full synchronous transactions save the operation,
+state and checksum chain together. Stable operation IDs replay their original
+receipts across restarts, including blocks; changed inputs refuse. Quotes and
+the five-second execution window are rechecked before commit. Startup and status
+perform complete deterministic journal replay; mutations check the current state
+and journal head, and duplicate replays verify their own receipt checksums. A
+normal exception or worker death before commit leaves no partial fill or margin
+reservation. Deep native Windows paths work without a registry change.
+
+Run a controlled accounting demonstration:
+
+```powershell
+& $projectPython -m local_ai_trader perpetual-paper-demo --config config/hyperliquid.toml
+```
+
+It creates an explicitly **synthetic** account under
+`data/hyperliquid/paper/synthetic_perpetual_<UTC>_<id>/account.sqlite`, opens an
+invented-price long, verifies a duplicate after restart, posts one invented
+hourly funding charge, retries it without double charging, then exits after
+restart. Two fills, one closed trade, released margin and no missing funding must
+reconcile. Prices, probabilities, reliability inputs, forecasts and funding are
+invented test data; any positive PnL is not strategy performance. Existing live
+observations and spot accounts remain separate. No new dependencies are needed.
+
+Inspect last recorded values without fetching prices:
+
+```powershell
+& $projectPython -m local_ai_trader perpetual-paper-status "data/hyperliquid/paper/<account-directory>/account.sqlite"
+```
+
+These legacy schema-1 books retain conservative collateral reservation rather
+than exact isolated or cross-margin liquidation mechanics. The schema-2 isolated
+model and continuous pretrial guardian described below provide separate books
+with venue rules and bounded liquidation handling. Recorded-funding maintenance
+is connected; reliability qualification and strategy entry execution remain
+before the forward trial. Live execution remains unavailable.
+
+## Recorded Hyperliquid funding and oracle evidence
+
+Read the latest 24 UTC funding hours for the configured eight contracts:
+
+```powershell
+& $projectPython -m local_ai_trader hyperliquid-funding --config config/hyperliquid.toml
+```
+
+The collector uses only public mainnet `/info` funding history, DEX metadata,
+asset contexts and order books. It preserves the actual publication timestamp
+(typically milliseconds after the hour), settled signed rate, premium and the
+time the response became available. Invalid/future event times, conflicting
+same-hour records, wrong coins and nonfinite rates are refused. Missing rate
+hours are named, never replaced by current context funding forecasts.
+
+Funding history does **not** contain historical oracle prices. The collector
+records an observed current oracle with its reception time and an independently
+fresh exchange-timestamped book. Contexts have no exchange timestamp, so these
+observations remain explicitly modeled proxies. Only a recorded oracle within
+strictly 30 seconds of the actual funding event can pair with its settled rate.
+The closest valid observation is chosen deterministically. A current mid-hour
+oracle cannot supply an unobserved old settlement; no forward-fill, interpolation
+or mark-price substitution is performed.
+
+An immutable `data/hyperliquid/funding/capture_<UTC>_<id>/` stores `raw.json`, the
+exact input TOML and `capture.json`, with artifact/config hashes and all receipt
+times. Loading recomputes the summary from raw evidence. Publication takes an OS
+lock, checks prior economic values for conflicts, rechecks configuration and book
+freshness, and atomically renames the staged directory. A failed publication
+leaves no capture. OS locks release on process death without requiring manual
+stale-lock removal; their small marker file is retained. Native deep Windows
+paths work without enabling a registry setting.
+
+Collect upcoming settlement windows until Ctrl+C:
+
+```powershell
+& $projectPython -m local_ai_trader hyperliquid-funding --config config/hyperliquid.toml --watch
+```
+
+At the default ten-second polling interval, watch mode archives oracle samples
+in the 30 seconds before and after each hour, plus changed settled history.
+Away from those windows it checks once a minute and avoids repeated full-response
+bundles when rates are unchanged. Funding history is cached for up to 60 seconds
+and refreshed when the hour changes. Near-hour samples remain available when a
+settled rate appears later. Preview pairing uses only the latest 24 funding hours
+and relevant captures rather than scanning a growing month of data each tick.
+Data errors are logged and retried without inventing observations.
+
+On first launch, **zero accounting-ready settlements and 192 rates lacking
+historical oracle evidence can be normal**: 24 hours × eight markets were observed
+after their settlements. As future hourly oracle windows are recorded, those new
+events become ready when their rates are published. The collector itself creates
+no account, fill, model or order, and does not start the forward strategy clock.
+
+`apply_recorded_funding` is the future coordinator adapter. It accepts only an
+observed-mode account with actual event timing, audits the archive, posts only
+that account's missing eligible events with stable IDs and leaves unmatched
+hours provisional. Recorded response availability and oracle times must precede
+application, preventing retrospective future-data use. Repeating the adapter
+does not charge another settlement or create a trade. Observed oracle proxies
+remain estimates in account reports. Existing synthetic accounts cannot consume
+these mainnet records.
+
+## Hyperliquid research preparation for all eight markets
+
+In a second PowerShell window, while the funding collector continues running:
+
+```powershell
+& $projectPython -m local_ai_trader hyperliquid-history --config config/hyperliquid.toml
+```
+
+This one operation requests recent five-minute candles for every configured
+contract, verifies current DEX metadata and USDC collateral, and prepares causal
+features, execution-aligned gross-return/class labels and chronological
+60/20/20 partitions. The public candle API retains at most 5,000 candles per
+interval. The default requests **4,999 closed candles** (about 17.36 days), leaving
+room for an inclusive forming candle, which is removed. This is recent bootstrap
+data, not a replacement for collecting a longer venue-specific history.
+`--bars` accepts 128–4,999; small datasets may be explicitly insufficient.
+
+Prices, volumes and model inputs remain in native contract units, including
+kPEPE. Only the original eight `feature_*` columns are model inputs. Prediction
+time is the current candle's completion; entry is the next five-minute opening
+after a one-bar delay, holding is six bars (30 minutes), and outcome availability
+is conservatively eight bars (40 minutes) after prediction. Gross returns use
+`open[t+8] / open[t+2] - 1`. A fixed ±0.2% gross-return threshold produces
+down/flat/up labels; it is a research definition rather than a profitability
+threshold. Fees and funding are excluded from gross labels and must be considered
+by the eventual cost-aware decision/account adapters.
+
+Missing candles are reported by timestamp and never filled. Every contiguous
+segment restarts feature warmup and removes unknown trailing labels, so neither
+rolling statistics nor future returns cross a gap. Short segments contribute no
+research rows. Labels must be known **strictly before** the next partition's
+first prediction, including removal at the equality boundary. Prepared markets
+require at least 128 training, 64 validation and 64 test rows after purging;
+insufficient markets preserve their raw/cleaned data and are named explicitly.
+These minimums are dataset checks, not evidence of model quality or reliability.
+
+An immutable `data/hyperliquid/research/history_<UTC>_<id>/` contains exact config
+bytes, raw public responses with per-request receipt times, a `history.json`
+protocol/quality manifest, and per-contract candle, feature and partition
+Parquets. Windows-safe directory names retain original contract identifiers in
+metadata. Atomic staging, checksums and a full reconstruction audit verify each
+derived artifact before publication; failures leave existing bundles intact.
+`load_history_bundle` is a **preparation audit** that reads all three partitions.
+Future fitting code must read only its declared partitions and must not invoke
+that full audit while promising to leave reserved test outcomes unopened.
+
+A genuine mainnet run prepared all eight markets with 4,999 closed candles,
+4,979 research rows, 2,979 training / 988 validation / 996 reserved test rows, and
+eight purged labels at each earlier boundary. This prepares data without fitting
+models, estimating validated reliability, scoring a strategy or starting the
+30-day paper trial. Original Coinbase experiments remain separate. The next
+model milestone uses this venue-specific data rather than connect Coinbase
+checkpoints to new markets.
+
+## Train and calibrate all Hyperliquid markets
+
+Use the directory printed by `hyperliquid-history`:
+
+```powershell
+& $projectPython -m local_ai_trader hyperliquid-train "data/hyperliquid/research/history_<UTC>_<id>" --device cuda
+```
+
+The batch fits training-frequency and scaled logistic controls, fixed XGBoost
+and a 30-epoch MLP, plus training-mean and scaled Ridge gross-return forecasts
+for every prepared market. Defaults reuse seed 42, logistic C=1, 200 depth-three
+XGBoost trees and a 64/32 MLP. Training is explicit: CUDA absence refuses the
+requested GPU run before publishing any batch. `--device cpu` is available for
+an explicitly chosen CPU run and automated verification. PyTorch must be present
+in the selected project interpreter.
+
+Base-model fitting and preprocessing use training rows only, without early
+stopping, validation eval sets or validation-driven hyperparameter changes.
+Logistic and Ridge parameters are saved as strict JSON; XGBoost uses its native
+JSON and MLP restoration loads tensors with `weights_only=True`. Saved inference
+reproduces native predictions without refitting and checks contract, features,
+class order, source hashes and fitting-label availability. Model probabilities
+use the explicit **up/down/flat** order; source string labels are encoded by
+name rather than reusing a different preparation order.
+
+Earlier validation fits each model's scalar temperature. Labels reaching the
+later-validation boundary are purged before fitting; all weights and temperatures
+freeze before the later assessment is predicted. A gap-free default market has
+2,979 training rows, 486 calibration rows, eight purged rows and 494 assessment
+rows. Raw/scaled class metrics and mean/Ridge return errors are reported on that
+later validation slice. Temperature fitting can worsen later metrics and is not
+a promise of calibrated future performance. Fixed primary families are BTC MLP
+and XGBoost for the other seven markets, selected before calibration/assessment;
+results never choose a favorable replacement. Missing training classes publish
+explicit family unavailability, with no substitution for the primary model.
+
+The fitting loader reads/hashes only `history.json`, its exact copied config and
+per-market train/validation Parquets. It never opens, stats or hashes reserved
+test, raw, candle or full-feature files. Source preparation's manifest establishes
+lineage; the whole-source reconstruction audit is not called during fitting.
+Training/validation schemas, gross-return labels, class boundaries, prediction
+times and partition purges are checked against the frozen protocol.
+
+Atomic `data/hyperliquid/models/models_<UTC>_<id>/` bundles contain all market
+checkpoints, native weights, temperatures, later-validation predictions, metrics,
+training history/hardware, recipe and source hashes. Output follows the history
+archive's data root, so relative paths in a copied config do not create a nested
+project. Failed fits, changed inputs and failed writes publish no partial batch.
+XGBoost native JSON is saved through Python IO and restored from checked bytes;
+PyTorch weights use open Python file handles. This avoids native filename limits
+on deep Windows directories while preserving compatibility with earlier model
+files. No system registry changes are required.
+
+`predict_saved_market` provides calibrated probabilities and gross-return point
+forecasts from explicitly selected saved models on causal rows, without future
+label columns. Its calibration ID binds the checkpoint. **Confidence and its
+reliability-validation ID remain unavailable:** probability, entropy and later
+validation accuracy do not establish the separately validated 70% reliability
+measure. Otherwise eligible BUY candidates route to REVIEW through the existing
+signal gate. These are research models without demonstrated profitability; no
+orders, paper fills or forward strategy month are created by this command.
+
+## Live model scanner and cost-aware entry previews
+
+Keep the funding collector open. In another PowerShell window, use the model
+directory printed by `hyperliquid-train`:
+
+```powershell
+& $projectPython -m local_ai_trader hyperliquid-decisions --models "data/hyperliquid/models/models_<UTC>_<id>" --config config/hyperliquid.toml --watch
+```
+
+This connects the saved primary models and Ridge return forecasts to fresh
+Hyperliquid data for all eight markets. Watch mode archives one preview per
+five-minute window; it does not retrain or read reserved test data. Source/model
+market rosters, feature parameters, execution-label timing and model hashes must
+agree. The eligible signal is the **previous** completed-window feature row:
+its one-bar delay has elapsed when the current quote arrives. Using the newest
+row would skip the configured execution delay. Unavailable primary models are
+named and never replaced by another family or an invented return forecast.
+
+The flat-position preview uses calibrated **up** probability, not the maximum
+class probability. Entry requires the configured 60% minimum and a Ridge gross
+return covering the current bid/ask spread, both taker fees, one basis point of
+slippage per side, a current-rate funding budget and the 0.2% net margin. The
+funding budget assumes one potential hourly settlement at the current positive
+rate and oracle/entry-price ratio; negative rates supply no hoped-for credit.
+This is an expected-cost assumption, not a settled funding payment or a maximum
+loss bound. The scanner and perpetual account share the same cost function and
+net-PnL denominator (entry fill notional).
+
+Otherwise eligible BUY candidates pass through the existing signal gate and
+remain REVIEW while validated reliability is unavailable. Low probability or
+insufficient cost coverage produces AVOID with its rule. No scanner result
+authorizes account risk or fills. The flat assumption does not represent real
+inventory, available collateral, position limits, daily loss or liquidation
+checks. Execution integration and separately validated reliability remain work
+before the forward strategy trial starts.
+
+Immutable `data/hyperliquid/decisions/preview_<UTC>_<id>/` bundles contain raw
+market responses, exact config bytes, model/checkpoint references, causal inputs,
+per-market forecasts, modeled costs and gate reasons. Quotes and mark/funding
+contexts must remain fresh at publication; a moved candle boundary, stale/future
+data or changed config/model refuses publication. Staging failures leave no
+partial preview. These observations create no account, order, fill or performance
+clock. `Ctrl+C` stops the scanner independently of the funding collector.
+
+## Prospective forecast outcomes alongside the scanner
+
+Stop only the decision scanner with `Ctrl+C`, update the branch, then restart
+with the same saved models and add `--track-outcomes`:
+
+```powershell
+& $projectPython -m local_ai_trader hyperliquid-decisions --models "data/hyperliquid/models/models_<UTC>_<id>" --config config/hyperliquid.toml --watch --track-outcomes
+```
+
+The entry preview still uses the delayed eligible signal. Separately, the
+tracker records the **newest completed signal** before its next future entry
+opening is known. These two rows are inferred together from the same frozen
+weights. Probabilities, causal features, Ridge/mean point forecasts, issuance,
+publication and source-preview hashes persist in a dedicated observation book.
+Issuance/publication and first insertion must all precede the one-bar-delayed
+entry; a late restart never backfills an unrecorded prediction after entry.
+
+At 40 minutes after the signal, completed real candles can resolve its delayed
+entry-open to six-bar exit-open return. Earlier resolution is refused even if
+future-looking inputs are supplied. The tracker first reuses the archived
+scanner candle response, then requests the exact public historical window when
+the pending signal falls outside that response. Missing intervals remain pending,
+without interpolation or fabricated outcomes. Long outages beyond API retention
+can leave permanently unavailable outcomes.
+
+The model/config-bound `data/hyperliquid/forward/<hash>/observations.sqlite`
+retains first-issued forecasts and resolved raw candle evidence. SQLite immediate
+transactions and full synchronous commits make deliveries restart-safe; duplicate
+forecasts/outcomes do not add counts, changed predictions or resolved economics
+refuse, and a failed batch rolls back. Startup audits reconstruct outcomes from
+raw candles, check record hashes and reconcile counters, including deletion
+detection. Watch mode caches the audited book and uses SQL diagnostic aggregates
+rather than reconstructing a growing month of outcomes every tick. Model or
+configuration changes select a separate observation book.
+
+Initially expect **8 recorded, 8 pending, 0 resolved** if all eight primary
+models are available. More predictions accumulate each five-minute window; the
+first outcomes mature 40 minutes after their signal time. Descriptive accuracy
+includes flat labels; the separate up-probability-at-least-60% hit counts show
+that directional subset. Ridge and mean MAE are gross-return forecast errors.
+Adjacent targets overlap and markets correlate, so neither row counts nor these
+descriptive metrics are independent samples, a confidence interval, validated
+reliability, net trading profit or approval to enter. Confidence remains
+unavailable and the **paper-profitability trial has not started**. This option
+collects the genuinely prospective evidence needed for later reliability work;
+it never fits models or opens reserved test partitions.
+
+## Observed paper-book monitor alongside the scanner
+
+Add `--paper-monitor` to the same scanner command to maintain a separate,
+**entry-paused paper account** alongside forecast tracking. Stop only the scanner
+with `Ctrl+C`; keep the funding collector running. A self-contained Windows
+launch, using your actual saved model directory, is:
+
+```powershell
+Set-Location "$env:USERPROFILE\trade-ai"
+$projectPython = @(
+    "$PWD\.venv\Scripts\python.exe"
+    "$PWD\venv\Scripts\python.exe"
+    "$env:USERPROFILE\local-ai-trader\.venv\Scripts\python.exe"
+    "$env:USERPROFILE\local-ai-trader\venv\Scripts\python.exe"
+) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+if (-not $projectPython) { throw "No project Python environment found." }
+& $projectPython -m local_ai_trader hyperliquid-decisions --models "data/hyperliquid/models/models_<UTC>_<id>" --config config/hyperliquid.toml --watch --track-outcomes --paper-monitor
+```
+
+The monitor creates `data/hyperliquid/paper/monitor_<hash>/account.sqlite` with
+**10,000 simulated USDC**, an observed-source contract, the fixed risk/cost policy
+and model/config binding. This balance is fictional paper collateral. Synthetic
+demo accounts and the existing prospective forecast book remain separate.
+The account and run manifest publish together; restart replay-audits the journal
+and resumes that book. A missing account under an existing run is an error rather
+than a balance reset. Model/config changes select a separate monitor book.
+
+Each new five-minute scanner observation rechecks raw books and received mark
+contexts before writes. Contract prices, quantity precision and venue fees must
+agree with archived evidence, preserving native `kPEPE` units. The account stores
+marks and immutable source decisions with preview hashes; each observation
+receipt includes the independent signal-gate result, execution skip, reconciled
+account values and a checksum. Duplicate previews preserve the first receipt and
+never add another mark event. A crash after account commit but before receipt
+publication reuses the original operation. A running clock rechecks the
+five-second operation deadline and quote freshness before transaction commit.
+
+The monitor **never calls entry execution**, even if a supplied signal passes
+the gate. An entry switch changed externally is paused again. Missing reliability
+continues to route otherwise eligible BUY signals to review; AVOID decisions
+stay blocked. No review notification is sent externally. Venue margin/liquidation
+integration and independently validated reliability remain before enabling a
+strategy trial. Zero fills, a flat paper balance and elapsed monitoring days do
+not establish profitability or start the required month.
+
+Maintenance can mark existing holdings, close due holdings against a current
+quote at or after their actual deadline, and post accounting-ready recorded
+funding through the existing audited archive adapter. Reducing exits precede
+funding archive work, so unavailable or corrupt funding evidence cannot trap a
+holding. Missing funding stays provisional; no historical oracle or fill price
+is invented. This runs once per scanner window and depends on successful scanner
+captures. The independent quote-driven guardian described below supplies continuous
+pretrial risk maintenance in a separate isolated book. The scanner monitor runs
+before potentially slower prospective outcome resolution. Live execution stays
+disabled, and no exchange trading credentials are needed.
+
+### Missing live candles affect only that market's signal
+
+The decision scanner treats a missing completed candle as a per-market data
+gap. For example, a HOOD gap produces `HOOD: AVOID`, reason
+`missing_completed_candles`, and an explicit list of the missing UTC candle
+opens. Other markets with complete windows continue inference and prospective
+tracking. Fresh books and mark contexts can still maintain the paused paper
+account independently of candle-based model inputs.
+
+An affected market has no features, momentum estimate, probabilities, return
+forecast or newly recorded forward prediction. Nothing is filled, interpolated
+or carried forward, and an older signal is not substituted. It resumes on a
+subsequent scanner window when the entire configured completed-candle window
+is available. Existing forecasts keep their original identity; outcomes whose
+required candles are missing remain pending while other outcomes can resolve.
+The existing model/config-bound observation and paper books are preserved.
+
+This permission to skip a signal does not relax raw candle validation, USDC
+metadata checks, quote freshness or future-time checks. Malformed data still
+refuses the capture. The separate `hyperliquid-feed` validation command retains
+its strict default and continues to report missing candles as an error.
+
+## Hyperliquid venue constraints and margin mathematics
+
+`hyperliquid-venue-check --config config/hyperliquid.toml` performs a one-shot
+public-mainnet audit without models, candles, accounts or signing credentials.
+Keep the funding collector and scanner running in their existing terminals.
+The checker retrieves DEX metadata/contexts and fresh books, reports native
+quantity steps, required margin modes and leverage tiers, then publishes an
+auditable `data/hyperliquid/venue_checks/check_<UTC>_<id>/` bundle. In the current
+mainnet metadata, HOOD requires isolated margin (`noCross`); the proposed paper
+venue plan therefore uses **isolated margin for all eight contracts at 1x**.
+This is a plan for the forthcoming execution adapter, without changing exchange
+settings or the frozen accounting contract of an existing paper book.
+
+The Decimal-based rules implement the documented constraints:
+
+- Size precision comes from `szDecimals`. Quantity rounding always floors and
+  never increases an allocation. `kPEPE` quantities/prices stay in contract units.
+- Fractional prices allow at most five significant figures and `6-szDecimals`
+  decimal places for perpetuals. Integer prices retain the documented exception.
+  Explicit BUY-limit rounding goes up, SELL-limit rounding goes down, and zero
+  rounded prices are refused. Submitted opening quantities/prices must already
+  satisfy precision; validation does not silently round an invalid order.
+- Opening notional must be at least 10 USDC. This opening-order check is separate
+  from reducing exits and is not used to prevent closing a small holding.
+- Margin table IDs below 50 use the documented single tier whose maximum leverage
+  equals the ID. Larger IDs require explicit tiers; the asset maximum alone is
+  insufficient. Duplicate tables, missing tiers, increasing leverage tiers and
+  mismatched asset/table maxima refuse readiness.
+- Maintenance is `notional*rate-deduction`, with `rate=1/(2*maximum_leverage)`
+  and cumulative deductions that keep tier boundaries continuous. Initial margin
+  at the planned 1x is quantity times mark price; it is not maintenance margin.
+- The isolated-long threshold calculator solves marked equity equal to tiered
+  maintenance using the tier at the solved liquidation price. Callers supply
+  isolated collateral after fees/funding. A zero result means no positive root
+  under those static inputs; subsequent costs can change the result. Cross-margin
+  sharing, partial liquidation, liquidity-dependent liquidation fills and the
+  backstop vault are not simulated by this calculator.
+
+Official references are archived as URLs in every report:
+[precision](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/tick-and-lot-size),
+[order errors/minimum](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/error-responses),
+[margin](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/margining),
+[tiers](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/margin-tiers), and
+[liquidation formula](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/liquidations).
+Raw responses, context reception times, exact config and source hashes accompany
+the derived report. Loading reconstructs the rules from those artifacts, and
+publication rechecks unchanged configuration and fresh evidence. Missing or
+unsupported evidence produces UNAVAILABLE, without inferred permissions.
+
+New scanner previews and paper-monitor receipts include the same venue-constraint
+assessment. Existing forecast/paper book identities remain unchanged. READY means
+the public contract rules were parsed; it grants no probability/reliability,
+account authorization, entry, live order or strategy-month credit. Existing
+monitors keep entries paused. The future paper execution adapter must enforce
+these rules transactionally alongside account risk, funding and validated
+reliability, and still needs liquidation-fill handling.
+
+`hyperliquid-isolated-demo --config config/hyperliquid.toml --venue-check <saved-check-directory>`
+now exercises a **separate synthetic isolated-margin account** using the audited
+rules in an archived venue check. Archived rules are inputs to this controlled
+test; they are not a claim of current venue readiness. It opens two invented
+positions, posts invented extreme funding, closes one through a sufficiently
+large synthetic bid, transfers the other's escrow through a modeled backstop,
+and reopens/replays the journal. No observed monitor account is migrated or
+unpaused, no trading key is needed, and this does not start the strategy month.
+
+New schema-2 perpetual books bind native venue rules at creation. Entries check
+price ticks, contract quantity precision, the 10-USDC opening minimum, full-size
+ask liquidity and 1x initial margin at least as large as mark notional. Entry
+fees come from free wallet cash; funding changes wallet cash and the affected
+position's escrow equally. Unrealized gains and funding credits stay allocated
+to that position. The account retains the 60% probability / independently
+validated 70% reliability gate, five-position ceiling, exposure, drawdown,
+daily-loss and cost-coverage checks. Historical schema-1 books retain their
+original accounting and replay results.
+
+The **bounded liquidation simulator** uses each position's isolated equity and
+its bound maintenance tiers, independently of unrelated wallet collateral.
+Maintenance breaches pause entries. A full reducing exit requires a fresh quote
+and enough best-bid quantity; the opening minimum never blocks a dust exit.
+The modeled fill is rounded adversely to a valid venue price and cannot consume
+another position's escrow or free cash. When a full book exit fails and isolated
+equity is strictly below two thirds of maintenance, a simplified backstop
+transfers that position and its remaining escrow. This is a transfer, not a
+fictional SELL fill or extra clearance fee. Late funding evidence adjusts the
+transferred escrow without charging free cash twice. Missing depth remains
+unknown and cannot authorize a transfer; an unresolved breach keeps performance
+provisional.
+
+This model rejects opening positions above 100,000 USDC and does not implement
+partial liquidation, matching-engine queue behavior, cross margin, or automatic
+margin top-ups. It is not an exact exchange liquidation engine. These paper
+operations are transactionally journaled and restartable and connect to the
+independent quote-driven guardian described below. The existing scanner monitor
+stays entry-paused. Reliability qualification and a strategy entry coordinator
+remain necessary before the forward strategy trial.
+
+`hyperliquid-paper --config config/hyperliquid.toml --watch` runs the independent
+**continuous paper risk guardian**. Keep the settled-funding collector and model
+scanner running alongside it. The guardian calls only public metadata/context
+and order-book endpoints; it never waits for candles or model inference. Its
+polling interval is capped at ten seconds, with one HTTP attempt and a timeout
+of at most five seconds per request. All configured reads run concurrently.
+Individual failed, stale or changed-rule markets become UNAVAILABLE while fresh
+markets can continue maintenance. Stale or future quotes never authorize fills.
+
+The first successful bootstrap requires verified rules and fresh evidence for
+all configured markets. It creates a separate, observed schema-2 account under
+`data/hyperliquid/paper/guardian_<identity>/account.sqlite`, with 10,000 simulated
+USDC, frozen config/rules/risk and entries paused. It resumes that same book on
+restart, audits its journal and bootstrap evidence, and refuses missing or
+changed accounts instead of resetting balances. An identity witness outside the
+run also detects a deleted run directory. Existing synthetic and five-minute
+monitor books remain separate. A process lock prevents a second watcher from
+reaching startup replay or API acquisition while the first is running.
+
+Each cycle archives compressed public evidence before ledger mutations. Held
+positions receive fresh marks, due horizon exits and known maintenance breaches
+are handled before funding archive IO, recorded settled funding is posted, and
+newly discovered maintenance breaches can then trigger
+bounded liquidation or backstop handling. Reducing exits use actual best-bid
+size and native adverse price rounding. Each new capture permits another attempt
+if a previous exit lacked liquidity. Pending capture/receipt recovery and stable
+operation IDs prevent duplicate economic actions after an interrupted receipt
+write. Expired pending quotes cannot produce a backdated fill; a fresh capture
+is needed. Missing funding remains provisional and never traps a fresh reducing
+exit. Flat books do not accumulate empty mark events in the financial journal.
+The funding adapter can reuse the guardian's startup-audited account instead of
+replaying the full journal on every funding attempt.
+
+`latest.json` contains the most recent observed time, per-market availability,
+ledger version, equity, funding gaps, position risks and action results. Treat
+an old receipt as an old observation; it is not a continuously fresh guarantee
+if the process or disk stops. Console changes and a minute heartbeat report
+READY/DEGRADED status. If the source config is edited during a run, maintenance
+continues with the frozen settings and reports the change; restarting with the
+changed config refuses to rebind the existing account. The account directory is
+anchored beside the project config, independently of the observation-output
+setting, so editing an output path cannot silently start an empty replacement book.
+
+
+If `pending.json` is empty or contains malformed JSON after an interruption, the
+guardian first performs a full ledger replay audit. It retains the original
+marker and a recovery record under the same run's `recovery/` directory, then
+polls fresh quotes. It never guesses the lost source pointer, replays orphaned
+old quotes or resets account/observation databases. Committed fills remain in the
+audited journal; any remaining reducing action uses new, fresh evidence. Source
+archives remain untouched and missed forecast windows stay unavailable. Invalid
+ledger/config/source bindings and structurally wrong but JSON-valid markers
+still refuse. JSON publication flushes and syncs the temporary file before its
+atomic replacement, preserving the previous file if synchronization fails.
+
+This is the **pretrial guardian**, not a newly qualified strategy: it never calls
+entry execution, supplies reliability confidence or starts the profitability
+month. The scanner's current decisions still require independent reliability
+qualification and an entry coordinator before a forward strategy trial. No
+exchange signing or live orders exist. The isolated simulator retains its
+100,000-USDC opening cap and unsupported partial-liquidation limits described
+above; continuous polling does not make it an exact exchange liquidation engine.
+
+To investigate a scanner that produces no BUY candidates, run
+`python -m local_ai_trader.hyperliquid.diagnostics --models MODEL_DIRECTORY --book OBSERVATIONS_SQLITE`
+using the verified project interpreter. This opens the forward book read-only,
+checks its model/config binding, and replays the saved causal features through
+the frozen classifiers, temperatures and return models. It compares raw/scaled
+UP scores with saved later-validation scores and reports training versus live
+feature medians/ranges. UP means a gross return greater than 0.2% over the fixed
+30-minute execution horizon, not any positive price change. Training inputs and
+saved assessment predictions are read; reserved test partitions remain unopened.
+These are descriptive diagnostics: range differences do not certify drift,
+overlapping rows are not independent reliability evidence, and replay accuracy
+does not establish profitability. Reliability success must mean positive net
+profit after modeled execution costs and funding. This command does not fit
+models, alter gates, approve entries or start the paper strategy month.
+
+`hyperliquid-net-outcomes --config config/hyperliquid.toml --models MODEL_DIRECTORY --book OBSERVATIONS_SQLITE --guardian GUARDIAN_DIRECTORY --watch`
+runs a separate **prospective net-outcome observer** alongside the funding
+collector, scanner and guardian. It makes no exchange requests and never writes
+their accounts or observation books. It freezes its protocol and registers only
+forecasts from the next five-minute signal onward, before the delayed entry.
+Old forecasts cannot become new prospective evidence. The process uses the first
+timely valid guardian sample it observes in the 30 seconds after entry is due;
+both the archived source quote and local observation must satisfy that window.
+The exit follows the same rule 30 minutes after the observed entry. Stale,
+future, pre-deadline and changed-rule quotes cannot stand in for either endpoint.
+Missed windows or insufficient full-size liquidity produce unavailable outcomes,
+not retrospective fills at a later favourable price.
+
+Every forecast is a separate hypothetical 1,000-USDC long benchmark. Native
+lot rounding limits entry notional plus fees to that budget; adverse native price
+rounding includes one basis point of slippage per side. Entry uses the observed
+ask, exit uses the observed bid, and both endpoints use their own fee assumptions.
+The report separates midpoint PnL, spread, slippage/rounding, fees and signed
+funding and reconciles those components to net PnL. Success means strictly
+positive net PnL. A positive price change alone is not success. Base and HIP-3
+fee assumptions and native `kPEPE` contract units remain intact.
+
+An hourly funding interval stays pending until recorded settled rates and
+near-event oracle proxies establish the actual settlement operands. Entries in
+the first 30 seconds of an hour require that evidence to establish whether the
+event occurred while held; only `entry_at < settlement_at <= exit_at` incurs a
+cash flow. Missing rates or historical oracles are never replaced with zero or
+a current funding forecast. The proxy remains explicitly estimated. Finalized
+outcomes retain their original funding source archives; restart reconstruction
+checks quote sources, settlement operands, cost arithmetic and an append-only
+hash journal. Stable per-forecast event identities prevent duplicate observations.
+The collector refuses a missing journal in an existing run instead of resetting it.
+
+Results live separately under `data/hyperliquid/net_outcomes/<binding>/`, with
+`latest.json` containing counts for pending quotes, pending funding, unavailable
+outcomes and resolved candidates. All forecasts are observed for diagnostics;
+candidate counts separately require the frozen 60% UP probability and predicted
+net return above the existing margin at the observed entry quote. Unavailable
+and unresolved observations remain visible and cannot certify reliability.
+
+These overlapping benchmarks do not allocate a portfolio, enforce concurrent
+account exposure or simulate the intrahorizon liquidation path. Summing them is
+not paper strategy PnL. They provide prospective net-cost outcome evidence, not
+independent samples or a validated 70% reliability measure. Confidence remains
+unavailable, entries remain paused, and the profitable strategy month does not
+start. No signing keys, account resets or live activation are involved.
