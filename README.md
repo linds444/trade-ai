@@ -1940,6 +1940,18 @@ changed config refuses to rebind the existing account. The account directory is
 anchored beside the project config, independently of the observation-output
 setting, so editing an output path cannot silently start an empty replacement book.
 
+
+If `pending.json` is empty or contains malformed JSON after an interruption, the
+guardian first performs a full ledger replay audit. It retains the original
+marker and a recovery record under the same run's `recovery/` directory, then
+polls fresh quotes. It never guesses the lost source pointer, replays orphaned
+old quotes or resets account/observation databases. Committed fills remain in the
+audited journal; any remaining reducing action uses new, fresh evidence. Source
+archives remain untouched and missed forecast windows stay unavailable. Invalid
+ledger/config/source bindings and structurally wrong but JSON-valid markers
+still refuse. JSON publication flushes and syncs the temporary file before its
+atomic replacement, preserving the previous file if synchronization fails.
+
 This is the **pretrial guardian**, not a newly qualified strategy: it never calls
 entry execution, supplies reliability confidence or starts the profitability
 month. The scanner's current decisions still require independent reliability

@@ -51,3 +51,16 @@ def test_native_path_is_idempotent_and_relative_paths_resolve_on_windows(tmp_pat
         assert converted.is_absolute()
     else:
         assert converted == source
+
+
+def test_failed_json_file_sync_keeps_existing_output_and_cleans_temporary_file(tmp_path, monkeypatch):
+    path = tmp_path / "pending.json"
+    write_json(path, {"capture": "original"})
+    before = path.read_bytes()
+    def fail_sync(descriptor):
+        raise OSError("disk sync failed")
+    monkeypatch.setattr(os, "fsync", fail_sync)
+    with pytest.raises(OSError, match="disk sync failed"):
+        write_json(path, {"capture": "replacement"})
+    assert path.read_bytes() == before
+    assert not list(tmp_path.glob("*.tmp"))

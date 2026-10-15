@@ -213,9 +213,10 @@ class PaperGuardian:
         self._validate_run()
         pending = self.root/"pending.json"
         if pending.exists():
-            saved = json.loads(pending.read_text(encoding="utf-8"))
-            self._maintain(saved)
-            pending.unlink()
+            saved = self._pending_marker(pending)
+            if saved is not None:
+                self._maintain(saved)
+                pending.unlink()
         payload = capture_quotes(self.client)
         at = _utc(datetime.fromisoformat(payload["captured_at"]))
         name = f"tick_{at.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:8]}"
@@ -226,6 +227,39 @@ class PaperGuardian:
         result = self._maintain(saved)
         pending.unlink()
         return result
+
+    def _pending_marker(self, pending):
+        """Keep malformed queue bytes; the audited ledger remains financial truth."""
+        raw = pending.read_bytes()
+        try:
+            saved = json.loads(raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            # A lost pointer cannot establish the original source hash/operation
+            # ID. Never guess an archive or execute its quotes retrospectively.
+            # Committed operations already live in the journal; remaining
+            # maintenance can use a new source capture after a full replay audit.
+            status = self.account.audit()
+            at = _utc(self.client.clock())
+            recovery = self.root/"recovery"
+            recovery.mkdir(exist_ok=True)
+            backup = recovery/f"pending_{at.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:8]}.invalid.json"
+            if pending.read_bytes() != raw:
+                raise ValueError("Guardian pending marker changed during recovery")
+            record = {"mode": "guardian_malformed_pending_recovery", "observed_at": at.isoformat(),
+                      "original": "pending.json", "backup": str(backup.relative_to(self.root)),
+                      "original_sha256": file_digest(pending), "reason": str(error),
+                      "run_binding_sha256": _hash(self.binding), "ledger_version": status["version"],
+                      "action": "retain malformed queue; resume with freshly acquired quotes"}
+            # Persist the recovery record before moving the original bytes.
+            write_json(backup.with_suffix(".recovery.json"), record)
+            os.replace(pending, backup)
+            LOGGER.warning("Recovered malformed guardian pending.json; original retained at %s; "
+                           "ledger audited at version %s; polling fresh quotes", backup, status["version"])
+            return None
+        if (not isinstance(saved, dict) or set(saved) != {"capture", "sha256"}
+                or not all(isinstance(saved[name], str) and saved[name] for name in ("capture", "sha256"))):
+            raise ValueError(f"Guardian pending marker has invalid structure: {pending}")
+        return saved
 
     def _maintain(self, saved):
         relative = Path(saved["capture"])

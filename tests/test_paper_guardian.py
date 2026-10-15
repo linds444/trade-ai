@@ -458,3 +458,116 @@ def test_output_path_edit_cannot_silently_start_an_empty_replacement_book(source
         PaperGuardian(config, client=None)
     assert book.account.audit()["wallet_balance"] == 10000
     assert not (config.parent.parent/"data"/"elsewhere"/"paper").exists()
+
+
+@pytest.mark.parametrize("damaged", [b"", b"{", b"\xff"])
+def test_malformed_pending_is_retained_and_latest_rebuilt_without_reset(source, damaged):
+    book, state = make(source)
+    first = book.tick()
+    archive = Path(first["source_capture"])
+    original_archive = archive.read_bytes()
+    before = book.account.path.read_bytes()
+    (book.root/"pending.json").write_bytes(damaged)
+    (book.root/"latest.json").unlink()
+    state["at"] += timedelta(seconds=10)
+    result = book.tick()
+    assert result["healthy"] and result["account"]["version"] == 0
+    assert book.account.path.read_bytes() == before
+    assert archive.read_bytes() == original_archive
+    backups = list((book.root/"recovery").glob("*.invalid.json"))
+    assert len(backups) == 1 and backups[0].read_bytes() == damaged
+    record = json.loads(next((book.root/"recovery").glob("*.recovery.json")).read_text())
+    assert record["original_sha256"] == file_digest(backups[0])
+    assert record["ledger_version"] == 0
+    assert json.loads((book.root/"latest.json").read_text())["source_capture"] != str(archive)
+    assert not (book.root/"pending.json").exists()
+
+
+def test_malformed_pending_after_committed_sell_never_repeats_sell(source, monkeypatch):
+    book, state = make(source)
+    seed(book)
+    state["at"] += timedelta(minutes=30)
+    original = module.write_json
+    def fail_receipt(path, value):
+        if str(path).endswith(".receipt.json"):
+            raise OSError("interrupted receipt")
+        return original(path, value)
+    monkeypatch.setattr(module, "write_json", fail_receipt)
+    with pytest.raises(OSError, match="interrupted receipt"):
+        book.tick()
+    before = book.account.audit()
+    assert before["fill_count"] == 2 and not before["positions"]
+    (book.root/"pending.json").write_bytes(b"")
+    monkeypatch.setattr(module, "write_json", original)
+    state["at"] += timedelta(seconds=10)
+    result = PaperGuardian(source[1], client=source[0]).tick()
+    assert result["account"]["fill_count"] == 2
+    assert result["account"]["wallet_balance"] == before["wallet_balance"]
+    assert book.account.audit()["version"] == before["version"]
+
+
+def test_malformed_pending_never_selects_an_orphaned_old_quote_for_exit(source, monkeypatch):
+    book, state = make(source)
+    seed(book)
+    state["at"] += timedelta(minutes=30)
+    original = book._maintain
+    def fail_before_mutation(saved):
+        raise OSError("interrupted before mutation")
+    monkeypatch.setattr(book, "_maintain", fail_before_mutation)
+    with pytest.raises(OSError):
+        book.tick()
+    old = json.loads((book.root/"pending.json").read_text())
+    old_path = book.root/old["capture"]
+    old_bytes = old_path.read_bytes()
+    (book.root/"pending.json").write_bytes(b"{")
+    state["at"] += timedelta(minutes=2)
+    state["prices"]["SOL"] = 101.
+    monkeypatch.setattr(book, "_maintain", original)
+    result = book.tick()
+    assert result["account"]["fill_count"] == 2
+    trade = book.account.audit()["trades"][0]
+    assert trade["exit_at"] == state["at"].isoformat(timespec="microseconds")
+    assert trade["exit_fill_price"] > 100
+    assert old_path.read_bytes() == old_bytes
+
+
+def test_malformed_pending_requires_successful_full_ledger_audit(source, monkeypatch):
+    book, state = make(source)
+    pending = book.root/"pending.json"
+    pending.write_bytes(b"")
+    requests = len(state["requests"])
+    def fail_audit():
+        raise ValueError("invented journal mismatch")
+    monkeypatch.setattr(book.account, "audit", fail_audit)
+    with pytest.raises(ValueError, match="journal mismatch"):
+        book.tick()
+    assert pending.read_bytes() == b""
+    assert not (book.root/"recovery").exists()
+    assert len(state["requests"]) == requests
+
+
+@pytest.mark.parametrize("value", [{}, None, []])
+def test_json_valid_but_invalid_pending_structure_is_not_quarantined(source, value):
+    book, state = make(source)
+    pending = book.root/"pending.json"
+    pending.write_text(json.dumps(value))
+    with pytest.raises(ValueError, match="invalid structure"):
+        book.tick()
+    assert pending.exists() and not (book.root/"recovery").exists()
+
+
+def test_recovery_record_failure_preserves_original_marker_and_ledger(source, monkeypatch):
+    book, state = make(source)
+    pending = book.root/"pending.json"
+    pending.write_bytes(b"")
+    before = book.account.path.read_bytes()
+    original = module.write_json
+    def fail_recovery(path, value):
+        if path.parent == book.root/"recovery":
+            raise OSError("recovery record disk failure")
+        return original(path, value)
+    monkeypatch.setattr(module, "write_json", fail_recovery)
+    with pytest.raises(OSError, match="recovery record disk failure"):
+        book.tick()
+    assert pending.read_bytes() == b""
+    assert book.account.path.read_bytes() == before
